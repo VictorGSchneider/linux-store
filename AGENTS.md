@@ -29,6 +29,11 @@ codex plugin add slint@slint
 npx skills add slint-ui/ai-plugins --skill slint
 ```
 
+## Documentation
+
+Slint docs: https://docs.slint.dev/latest/docs/slint/ — consult it (or the plugin's docs search) for Slint
+language and API questions instead of relying on memory.
+
 ## Build and Run
 
 ```sh
