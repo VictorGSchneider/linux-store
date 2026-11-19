@@ -6,7 +6,10 @@ This file may be older than the code. Where they disagree, trust the code, and u
 
 ## Layout
 
-Cargo workspace: `gui/` is the Slint app. Planned crates: `core`, `backends/*`, `helper`.
+Cargo workspace: `core/` (package `store-core`; not named `core`, which would collide with Rust's
+`core`), `backends/pacman/` (package `store-backend-pacman`), `cli/` (package `store-cli`, binary
+`store`) and `gui/` (the Slint app). Planned: more `backends/*` and `helper`.
+Run the core's tests with `cargo test --workspace --features store-core/testing`.
 `legacy/` holds the old bash `stoa-store`; use it as reference only.
 
 ## Install the Slint Plugin

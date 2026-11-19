@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["gui", "core", "backends/pacman"]
+members = ["gui", "core", "backends/pacman", "cli"]
 
 [profile.release]
 codegen-units = 1

@@ -9,8 +9,9 @@ and later drivers, firmware and programming-language toolchains.
 Think Microsoft Store, App Store or Play Store, but open, light, and not tied to a
 single package format.
 
-> **Status: early development.** The workspace and a placeholder window exist; the
-> store itself is not usable yet. See [Roadmap](#roadmap).
+> **Status: early development.** The core, the search index and a read-only pacman
+> backend work and can be tried from the `store` command line (see below); the GUI is
+> still a placeholder window and nothing can be installed yet. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -71,6 +72,9 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 
 | Path | What it is |
 |---|---|
+| `core/` | `store-core`: package model, `Backend` trait, SQLite search index, `Store` |
+| `backends/pacman/` | Read-only pacman backend (libalpm) |
+| `cli/` | `store` command line: `refresh`, `search`, `installed` (used to verify the core) |
 | `gui/` | The Slint application |
 | `docs/` | Design documents |
 | `legacy/` | The original bash/yad `stoa-store`, kept as reference only |
@@ -97,6 +101,17 @@ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json cargo 
 ```
 
 Details are in [`AGENTS.md`](AGENTS.md).
+
+### Try the core from the command line
+
+```sh
+cargo run --release -p store-cli -- refresh      # index the pacman repos
+cargo run --release -p store-cli -- search firefox
+cargo run --release -p store-cli -- installed
+```
+
+Read-only: it never installs, removes or writes to pacman's databases. On an Arch
+system with ~16,000 packages, refresh takes about half a second and a search about 8 ms.
 
 ## Contributing
 
