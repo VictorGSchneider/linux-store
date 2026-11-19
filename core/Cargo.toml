@@ -1,0 +1,16 @@
+[package]
+name = "store-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Package model, backend trait and search index for linux-store"
+
+[features]
+testing = []
+
+[dependencies]
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"
