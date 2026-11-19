@@ -7,7 +7,12 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let code = store_cli::run(
         &args,
-        |path| Ok(Store::new(Index::open(path)?, vec![Box::new(PacmanBackend::from_system())])),
+        |path| {
+            Ok(Store::new(
+                Index::open(path)?,
+                vec![Box::new(PacmanBackend::from_system())],
+            ))
+        },
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     );

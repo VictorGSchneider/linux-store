@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch/PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # The core, the index, the pacman backend and the CLI. Runs on Arch Linux because the pacman
+  # backend links libalpm and Arch is the first supported distro. The GUI is built separately.
+  core:
+    name: Clippy and tests (Arch Linux)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed base-devel git rust
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: >-
+          cargo clippy --locked --workspace --exclude linux-store --all-targets
+          --features store-core/testing -- -D warnings
+      - name: Tests
+        run: >-
+          cargo test --locked --workspace --exclude linux-store
+          --features store-core/testing
+      - name: CLI smoke test
+        run: cargo run --locked --release -p store-cli -- --help
+
+  # Compile-check of the Slint GUI. Never runs it (see the GPU note in AGENTS.md).
+  gui:
+    name: GUI build check (Arch Linux)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain and GUI libraries
+        run: >-
+          pacman -Syu --noconfirm --needed base-devel git rust pkgconf fontconfig freetype2
+          libxkbcommon wayland libx11 libxcb libxcursor libxi libxrandr mesa libglvnd
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p linux-store

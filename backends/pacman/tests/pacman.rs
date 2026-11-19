@@ -11,7 +11,10 @@ fn load() -> (fixture::Fixture, Vec<Package>) {
 }
 
 fn find<'a>(packages: &'a [Package], name: &str) -> &'a Package {
-    packages.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} missing"))
+    packages
+        .iter()
+        .find(|p| p.name == name)
+        .unwrap_or_else(|| panic!("{name} missing"))
 }
 
 #[test]
@@ -30,7 +33,10 @@ fn lists_sync_packages_with_metadata() {
 #[test]
 fn marks_installed_version() {
     let (_fx, packages) = load();
-    assert_eq!(find(&packages, "hello").installed_version.as_deref(), Some("1.0-1"));
+    assert_eq!(
+        find(&packages, "hello").installed_version.as_deref(),
+        Some("1.0-1")
+    );
     assert_eq!(find(&packages, "world").installed_version, None);
 }
 
@@ -65,7 +71,9 @@ fn corrupt_sync_db_is_an_error_not_an_empty_catalog() {
     std::fs::write(fx.db_path().join("sync/core.db"), "garbage").unwrap();
     let backend = PacmanBackend::with_paths(&fx.root().join("root"), &fx.db_path(), &["core"]);
     match backend.packages() {
-        Err(store_core::Error::Backend { message, .. }) => assert!(message.contains("core"), "{message}"),
+        Err(store_core::Error::Backend { message, .. }) => {
+            assert!(message.contains("core"), "{message}")
+        }
         other => panic!("expected a backend error, got {other:?}"),
     }
 }
@@ -75,7 +83,10 @@ fn missing_sync_db_is_an_error_not_an_empty_catalog() {
     let fx = fixture::build();
     std::fs::remove_file(fx.db_path().join("sync/core.db")).unwrap();
     let backend = PacmanBackend::with_paths(&fx.root().join("root"), &fx.db_path(), &["core"]);
-    assert!(matches!(backend.packages(), Err(store_core::Error::Backend { .. })));
+    assert!(matches!(
+        backend.packages(),
+        Err(store_core::Error::Backend { .. })
+    ));
 }
 
 #[test]

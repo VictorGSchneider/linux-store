@@ -7,7 +7,11 @@ use clap::{Parser, Subcommand};
 use store_core::{Outcome, Package, Store};
 
 #[derive(Parser)]
-#[command(name = "store", version, about = "Search and list packages from every source")]
+#[command(
+    name = "store",
+    version,
+    about = "Search and list packages from every source"
+)]
 struct Cli {
     /// Path of the index database (default: the user cache directory).
     #[arg(long, global = true)]
@@ -32,7 +36,10 @@ enum Command {
 }
 
 /// `$XDG_CACHE_HOME/linux-store/index.db`, else `$HOME/.cache/linux-store/index.db`.
-pub fn default_db_path_from(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+pub fn default_db_path_from(
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
     let cache = match xdg_cache_home.filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".cache"),
@@ -46,7 +53,11 @@ pub fn default_db_path() -> Option<PathBuf> {
 
 fn format_package(p: &Package) -> String {
     let installed = if p.is_installed() { " [installed]" } else { "" };
-    let description = p.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
+    let description = p
+        .description
+        .as_deref()
+        .map(|d| format!(" — {d}"))
+        .unwrap_or_default();
     format!(
         "{}/{} {} {}{}{}",
         p.source,
@@ -71,25 +82,40 @@ pub fn run<W: Write, E: Write>(
         Err(e) => {
             let code = e.exit_code();
             let rendered = e.render().to_string();
-            let _ = if e.use_stderr() { write!(err, "{rendered}") } else { write!(out, "{rendered}") };
+            let _ = if e.use_stderr() {
+                write!(err, "{rendered}")
+            } else {
+                write!(out, "{rendered}")
+            };
             return code;
         }
     };
 
     let Some(db_path) = cli.db.or_else(default_db_path) else {
-        let _ = writeln!(err, "store: cannot find a cache directory; pass --db <path>");
+        let _ = writeln!(
+            err,
+            "store: cannot find a cache directory; pass --db <path>"
+        );
         return 1;
     };
-    if let Some(parent) = db_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            let _ = writeln!(err, "store: cannot open index at {}: {e}", db_path.display());
-            return 1;
-        }
+    if let Some(parent) = db_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        let _ = writeln!(
+            err,
+            "store: cannot open index at {}: {e}",
+            db_path.display()
+        );
+        return 1;
     }
     let mut store = match make_store(&db_path) {
         Ok(store) => store,
         Err(e) => {
-            let _ = writeln!(err, "store: cannot open index at {}: {e}", db_path.display());
+            let _ = writeln!(
+                err,
+                "store: cannot open index at {}: {e}",
+                db_path.display()
+            );
             return 1;
         }
     };
@@ -99,16 +125,23 @@ pub fn run<W: Write, E: Write>(
             let report = store.refresh();
             for s in &report.sources {
                 let _ = match &s.outcome {
-                    Outcome::Updated { packages } => writeln!(out, "{}: {packages} packages", s.source),
+                    Outcome::Updated { packages } => {
+                        writeln!(out, "{}: {packages} packages", s.source)
+                    }
                     Outcome::Unavailable => writeln!(out, "{}: unavailable", s.source),
                     Outcome::Failed(message) => writeln!(out, "{}: failed: {message}", s.source),
                 };
             }
             let all_failed = !report.sources.is_empty()
-                && report.sources.iter().all(|s| matches!(s.outcome, Outcome::Failed(_)));
+                && report
+                    .sources
+                    .iter()
+                    .all(|s| matches!(s.outcome, Outcome::Failed(_)));
             i32::from(all_failed)
         }
-        Command::Search { query, limit } => print_packages(store.search(&query.join(" "), limit), out, err),
+        Command::Search { query, limit } => {
+            print_packages(store.search(&query.join(" "), limit), out, err)
+        }
         Command::Installed => print_packages(store.installed(), out, err),
     }
 }

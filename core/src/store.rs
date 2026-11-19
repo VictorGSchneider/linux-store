@@ -3,7 +3,9 @@ use crate::{Backend, Index, Package, Result, SourceId};
 /// What happened to one source during [`Store::refresh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Updated { packages: usize },
+    Updated {
+        packages: usize,
+    },
     /// The backend cannot be used on this system; its indexed data is untouched.
     Unavailable,
     /// The backend or the index failed; the source's indexed data is untouched.
@@ -41,10 +43,11 @@ impl Store {
             let outcome = if !backend.is_available() {
                 Outcome::Unavailable
             } else {
-                match backend
-                    .packages()
-                    .and_then(|packages| self.index.replace_source(&source, &packages).map(|()| packages.len()))
-                {
+                match backend.packages().and_then(|packages| {
+                    self.index
+                        .replace_source(&source, &packages)
+                        .map(|()| packages.len())
+                }) {
                     Ok(packages) => Outcome::Updated { packages },
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
@@ -74,17 +77,26 @@ mod tests {
     }
 
     fn installed_pkg(source: &str, name: &str) -> Package {
-        Package { installed_version: Some("1.0".into()), ..pkg(source, name, "x") }
+        Package {
+            installed_version: Some("1.0".into()),
+            ..pkg(source, name, "x")
+        }
     }
 
     #[test]
     fn refresh_indexes_available_backends() {
-        let fake = FakeBackend::new("fake", vec![pkg("fake", "alpha", "first"), pkg("fake", "beta", "second")]);
+        let fake = FakeBackend::new(
+            "fake",
+            vec![pkg("fake", "alpha", "first"), pkg("fake", "beta", "second")],
+        );
         let mut store = Store::new(Index::open_in_memory().unwrap(), vec![boxed(fake)]);
         let report = store.refresh();
         assert_eq!(
             report.sources,
-            [SourceReport { source: SourceId::new("fake"), outcome: Outcome::Updated { packages: 2 } }]
+            [SourceReport {
+                source: SourceId::new("fake"),
+                outcome: Outcome::Updated { packages: 2 }
+            }]
         );
         assert_eq!(store.search("alpha", 10).unwrap().len(), 1);
     }
@@ -93,7 +105,10 @@ mod tests {
     fn failing_backend_does_not_block_others() {
         let bad = FakeBackend::new("bad", vec![]).failing("boom");
         let good = FakeBackend::new("good", vec![pkg("good", "tool", "x")]);
-        let mut store = Store::new(Index::open_in_memory().unwrap(), vec![boxed(bad), boxed(good)]);
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![boxed(bad), boxed(good)],
+        );
         let report = store.refresh();
         assert!(matches!(report.sources[0].outcome, Outcome::Failed(_)));
         assert_eq!(report.sources[1].outcome, Outcome::Updated { packages: 1 });
@@ -141,10 +156,18 @@ mod tests {
 
     #[test]
     fn installed_comes_from_the_index() {
-        let fake = FakeBackend::new("fake", vec![installed_pkg("fake", "yes"), pkg("fake", "no", "x")]);
+        let fake = FakeBackend::new(
+            "fake",
+            vec![installed_pkg("fake", "yes"), pkg("fake", "no", "x")],
+        );
         let mut store = Store::new(Index::open_in_memory().unwrap(), vec![boxed(fake)]);
         store.refresh();
-        let names: Vec<String> = store.installed().unwrap().into_iter().map(|p| p.name).collect();
+        let names: Vec<String> = store
+            .installed()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
         assert_eq!(names, ["yes"]);
     }
 }

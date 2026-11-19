@@ -50,7 +50,10 @@ impl Index {
     fn init(conn: Connection) -> Result<Index> {
         let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if found > SCHEMA_VERSION {
-            return Err(Error::UnsupportedIndexVersion { found, supported: SCHEMA_VERSION });
+            return Err(Error::UnsupportedIndexVersion {
+                found,
+                supported: SCHEMA_VERSION,
+            });
         }
         if found == 0 {
             conn.execute_batch(SCHEMA)?;
@@ -62,7 +65,10 @@ impl Index {
     /// Atomically replaces everything stored for `source` with `packages`.
     pub fn replace_source(&mut self, source: &SourceId, packages: &[Package]) -> Result<()> {
         if let Some(bad) = packages.iter().find(|p| &p.source != source) {
-            return Err(Error::SourceMismatch { expected: source.clone(), found: bad.source.clone() });
+            return Err(Error::SourceMismatch {
+                expected: source.clone(),
+                found: bad.source.clone(),
+            });
         }
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -75,8 +81,9 @@ impl Index {
                 "INSERT INTO packages (source, name, version, installed_version, description, \
                  repo, url, download_size, installed_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            let mut insert_fts =
-                tx.prepare("INSERT INTO packages_fts (rowid, name, description) VALUES (?1, ?2, ?3)")?;
+            let mut insert_fts = tx.prepare(
+                "INSERT INTO packages_fts (rowid, name, description) VALUES (?1, ?2, ?3)",
+            )?;
             for p in packages {
                 insert.execute(params![
                     p.source.as_str(),
@@ -132,7 +139,13 @@ impl Index {
         let fts_query = terms
             .iter()
             .enumerate()
-            .map(|(i, t)| if i == last { format!("\"{t}\"*") } else { format!("\"{t}\"") })
+            .map(|(i, t)| {
+                if i == last {
+                    format!("\"{t}\"*")
+                } else {
+                    format!("\"{t}\"")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         let columns = COLUMNS
@@ -151,14 +164,20 @@ impl Index {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![fts_query, query.trim(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            params![
+                fts_query,
+                query.trim(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
             row_to_package,
         )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn count(&self) -> Result<usize> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))?;
         Ok(n as usize)
     }
 }
@@ -206,7 +225,10 @@ mod tests {
     }
 
     fn installed(source: &str, name: &str) -> Package {
-        Package { installed_version: Some("1.0".into()), ..pkg(source, name, "x") }
+        Package {
+            installed_version: Some("1.0".into()),
+            ..pkg(source, name, "x")
+        }
     }
 
     #[test]
@@ -220,7 +242,8 @@ mod tests {
             ..full("a", "bare")
         };
         let rich = full("a", "rich");
-        idx.replace_source(&sid("a"), &[rich.clone(), bare.clone()]).unwrap();
+        idx.replace_source(&sid("a"), &[rich.clone(), bare.clone()])
+            .unwrap();
         assert_eq!(idx.get(&sid("a"), "rich").unwrap(), Some(rich));
         assert_eq!(idx.get(&sid("a"), "bare").unwrap(), Some(bare));
         assert_eq!(idx.get(&sid("a"), "missing").unwrap(), None);
@@ -229,9 +252,12 @@ mod tests {
     #[test]
     fn replace_source_replaces_only_that_source() {
         let mut idx = Index::open_in_memory().unwrap();
-        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")]).unwrap();
-        idx.replace_source(&sid("b"), &[pkg("b", "y", "d")]).unwrap();
-        idx.replace_source(&sid("a"), &[pkg("a", "z", "d")]).unwrap();
+        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")])
+            .unwrap();
+        idx.replace_source(&sid("b"), &[pkg("b", "y", "d")])
+            .unwrap();
+        idx.replace_source(&sid("a"), &[pkg("a", "z", "d")])
+            .unwrap();
         assert_eq!(idx.get(&sid("a"), "x").unwrap(), None);
         assert!(idx.get(&sid("a"), "z").unwrap().is_some());
         assert!(idx.get(&sid("b"), "y").unwrap().is_some());
@@ -241,7 +267,8 @@ mod tests {
     #[test]
     fn replace_source_is_atomic_on_mismatch() {
         let mut idx = Index::open_in_memory().unwrap();
-        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")]).unwrap();
+        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")])
+            .unwrap();
         let err = idx
             .replace_source(&sid("a"), &[pkg("a", "ok", "d"), pkg("b", "bad", "d")])
             .unwrap_err();
@@ -253,7 +280,8 @@ mod tests {
     #[test]
     fn replace_source_rolls_back_when_an_insert_fails() {
         let mut idx = Index::open_in_memory().unwrap();
-        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")]).unwrap();
+        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")])
+            .unwrap();
         // Duplicate name violates UNIQUE(source, name) after the old rows were deleted.
         let err = idx
             .replace_source(&sid("a"), &[pkg("a", "dup", "d"), pkg("a", "dup", "d")])
@@ -268,10 +296,19 @@ mod tests {
         let mut idx = Index::open_in_memory().unwrap();
         idx.replace_source(
             &sid("a"),
-            &[installed("a", "zsh"), pkg("a", "git", "d"), installed("a", "bash")],
+            &[
+                installed("a", "zsh"),
+                pkg("a", "git", "d"),
+                installed("a", "bash"),
+            ],
         )
         .unwrap();
-        let names: Vec<String> = idx.installed().unwrap().into_iter().map(|p| p.name).collect();
+        let names: Vec<String> = idx
+            .installed()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
         assert_eq!(names, ["bash", "zsh"]);
     }
 
@@ -281,7 +318,8 @@ mod tests {
         let path = dir.path().join("index.db");
         {
             let mut idx = Index::open(&path).unwrap();
-            idx.replace_source(&sid("a"), &[pkg("a", "x", "d"), pkg("a", "y", "d")]).unwrap();
+            idx.replace_source(&sid("a"), &[pkg("a", "x", "d"), pkg("a", "y", "d")])
+                .unwrap();
         }
         assert_eq!(Index::open(&path).unwrap().count().unwrap(), 2);
     }
@@ -343,13 +381,21 @@ mod tests {
 
     #[test]
     fn search_matches_description() {
-        let idx = indexed(&[pkg("a", "git", "the fast distributed version control system")]);
+        let idx = indexed(&[pkg(
+            "a",
+            "git",
+            "the fast distributed version control system",
+        )]);
         assert_eq!(names(idx.search("distributed", 10).unwrap()), ["git"]);
     }
 
     #[test]
     fn search_requires_all_terms() {
-        let idx = indexed(&[pkg("a", "git", "the fast distributed version control system")]);
+        let idx = indexed(&[pkg(
+            "a",
+            "git",
+            "the fast distributed version control system",
+        )]);
         assert_eq!(names(idx.search("fast distributed", 10).unwrap()), ["git"]);
         assert!(idx.search("fast banana", 10).unwrap().is_empty());
     }
@@ -363,7 +409,17 @@ mod tests {
     #[test]
     fn search_survives_fts_syntax() {
         let idx = indexed(&[pkg("a", "firefox", "browser"), pkg("a", "c", "compiler")]);
-        for q in ["\"", "firefox\"", "a AND", "(", "foo:bar", "-x", "*", "NEAR(", "c++"] {
+        for q in [
+            "\"",
+            "firefox\"",
+            "a AND",
+            "(",
+            "foo:bar",
+            "-x",
+            "*",
+            "NEAR(",
+            "c++",
+        ] {
             assert!(idx.search(q, 10).is_ok(), "query {q:?} errored");
         }
     }
@@ -377,7 +433,9 @@ mod tests {
 
     #[test]
     fn search_respects_limit() {
-        let many: Vec<Package> = (0..20).map(|i| pkg("a", &format!("tool-{i}"), "tool")).collect();
+        let many: Vec<Package> = (0..20)
+            .map(|i| pkg("a", &format!("tool-{i}"), "tool"))
+            .collect();
         let idx = indexed(&many);
         assert_eq!(idx.search("tool", 5).unwrap().len(), 5);
     }
@@ -388,7 +446,8 @@ mod tests {
         let path = dir.path().join("index.db");
         {
             let mut idx = Index::open(&path).unwrap();
-            idx.replace_source(&sid("a"), &[pkg("a", "firefox", "browser")]).unwrap();
+            idx.replace_source(&sid("a"), &[pkg("a", "firefox", "browser")])
+                .unwrap();
         }
         // Another process (a refresh) holds the write lock.
         let writer = rusqlite::Connection::open(&path).unwrap();
@@ -396,7 +455,11 @@ mod tests {
         let started = std::time::Instant::now();
         let reader = Index::open(&path).expect("open must not block on the writer");
         assert_eq!(names(reader.search("firefox", 10).unwrap()), ["firefox"]);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -408,8 +471,13 @@ mod tests {
             .unwrap()
             .pragma_update(None, "user_version", 99)
             .unwrap();
-        let err = Index::open(&path).err().expect("a newer schema must be refused");
-        assert!(matches!(err, Error::UnsupportedIndexVersion { found: 99, .. }), "{err:?}");
+        let err = Index::open(&path)
+            .err()
+            .expect("a newer schema must be refused");
+        assert!(
+            matches!(err, Error::UnsupportedIndexVersion { found: 99, .. }),
+            "{err:?}"
+        );
         let version: i64 = rusqlite::Connection::open(&path)
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))

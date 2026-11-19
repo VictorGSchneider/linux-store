@@ -1,5 +1,7 @@
 # linux-store
 
+[![CI](https://github.com/VictorGSchneider/linux-store/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorGSchneider/linux-store/actions/workflows/ci.yml)
+
 **A universal, open-source app store for Linux.**
 
 One fast, simple graphical app to find and install software from *every* source
@@ -112,6 +114,23 @@ cargo run --release -p store-cli -- installed
 
 Read-only: it never installs, removes or writes to pacman's databases. On an Arch
 system with ~16,000 packages, refresh takes about half a second and a search about 8 ms.
+
+## Continuous integration
+
+Every push to `main` and every pull request runs (see `.github/workflows/`):
+
+- `cargo fmt --check`
+- `cargo clippy -D warnings` and the full test suite on Arch Linux
+- a compile check of the Slint GUI (it is never run in CI)
+- a weekly and per-dependency-change `cargo audit`; Dependabot proposes weekly updates
+
+Run the same checks locally before pushing:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings
+cargo test --workspace --exclude linux-store --features store-core/testing
+```
 
 ## Contributing
 

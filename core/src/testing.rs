@@ -25,7 +25,12 @@ pub struct FakeBackend {
 
 impl FakeBackend {
     pub fn new(source: &str, packages: Vec<Package>) -> FakeBackend {
-        FakeBackend { source: SourceId::new(source), packages, available: true, failure: None }
+        FakeBackend {
+            source: SourceId::new(source),
+            packages,
+            available: true,
+            failure: None,
+        }
     }
 
     pub fn unavailable(mut self) -> FakeBackend {
@@ -50,7 +55,10 @@ impl Backend for FakeBackend {
 
     fn packages(&self) -> Result<Vec<Package>> {
         match &self.failure {
-            Some(message) => Err(Error::Backend { source_id: self.source.clone(), message: message.clone() }),
+            Some(message) => Err(Error::Backend {
+                source_id: self.source.clone(),
+                message: message.clone(),
+            }),
             None => Ok(self.packages.clone()),
         }
     }

@@ -32,6 +32,12 @@ codex plugin add slint@slint
 npx skills add slint-ui/ai-plugins --skill slint
 ```
 
+## Before you push
+
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings`, the tests and a GUI compile check.
+Run the same locally: `cargo fmt --all --check`, `cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings`,
+`cargo test --workspace --exclude linux-store --features store-core/testing`.
+
 ## Documentation
 
 Slint docs: https://docs.slint.dev/latest/docs/slint/ — consult it (or the plugin's docs search) for Slint

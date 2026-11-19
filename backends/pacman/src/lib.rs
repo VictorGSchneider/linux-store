@@ -10,7 +10,11 @@ const SOURCE: &str = "pacman";
 enum Config {
     /// Use the system's `/etc/pacman.conf`.
     System,
-    Paths { root: PathBuf, db_path: PathBuf, repos: Vec<String> },
+    Paths {
+        root: PathBuf,
+        db_path: PathBuf,
+        repos: Vec<String>,
+    },
 }
 
 pub struct PacmanBackend {
@@ -20,7 +24,9 @@ pub struct PacmanBackend {
 impl PacmanBackend {
     /// Reads repositories, root and database path from the system's `pacman.conf`.
     pub fn from_system() -> PacmanBackend {
-        PacmanBackend { config: Config::System }
+        PacmanBackend {
+            config: Config::System,
+        }
     }
 
     /// Opens explicit paths and registers the named sync repos. Used by tests.
@@ -41,12 +47,17 @@ impl PacmanBackend {
                 let conf = pacmanconf::Config::new().map_err(|e| e.to_string())?;
                 alpm_utils::alpm_with_conf(&conf).map_err(|e| e.to_string())
             }
-            Config::Paths { root, db_path, repos } => {
+            Config::Paths {
+                root,
+                db_path,
+                repos,
+            } => {
                 let root = root.to_str().ok_or("root path is not valid UTF-8")?;
                 let db_path = db_path.to_str().ok_or("db path is not valid UTF-8")?;
                 let alpm = Alpm::new(root, db_path).map_err(|e| e.to_string())?;
                 for repo in repos {
-                    alpm.register_syncdb(repo.as_str(), SigLevel::NONE).map_err(|e| e.to_string())?;
+                    alpm.register_syncdb(repo.as_str(), SigLevel::NONE)
+                        .map_err(|e| e.to_string())?;
                 }
                 Ok(alpm)
             }
@@ -68,7 +79,10 @@ impl Backend for PacmanBackend {
     }
 
     fn packages(&self) -> Result<Vec<Package>> {
-        let backend_error = |message: String| Error::Backend { source_id: self.source(), message };
+        let backend_error = |message: String| Error::Backend {
+            source_id: self.source(),
+            message,
+        };
         let alpm = self.open().map_err(backend_error)?;
         let local = alpm.localdb();
         let mut seen = HashSet::new();
@@ -80,7 +94,11 @@ impl Backend for PacmanBackend {
             // records the reason in the handle's errno (`Db::is_valid` stays Ok). Treat that as
             // a failure, otherwise a refresh would silently wipe the repo's catalog.
             if pkgs.is_empty() && !alpm.last_error().ok() {
-                return Err(backend_error(format!("repository {}: {}", db.name(), alpm.last_error())));
+                return Err(backend_error(format!(
+                    "repository {}: {}",
+                    db.name(),
+                    alpm.last_error()
+                )));
             }
             for p in pkgs {
                 // The first repo wins when a name appears in several, like pacman itself.
