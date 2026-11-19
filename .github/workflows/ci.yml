@@ -23,7 +23,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -38,7 +38,7 @@ jobs:
     steps:
       - name: Install toolchain
         run: pacman -Syu --noconfirm --needed base-devel git rust
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: >-
@@ -61,6 +61,6 @@ jobs:
         run: >-
           pacman -Syu --noconfirm --needed base-devel git rust pkgconf fontconfig freetype2
           libxkbcommon wayland libx11 libxcb libxcursor libxi libxrandr mesa libglvnd
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p linux-store
