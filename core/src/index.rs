@@ -106,6 +106,49 @@ impl Index {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Full-text search over name and description.
+    ///
+    /// The query is split into alphanumeric terms, each passed to FTS5 as a quoted literal (so
+    /// user input can never be interpreted as FTS syntax); the last term matches as a prefix and
+    /// all terms must match. Ordering: exact name, then name starting with the query, then
+    /// bm25 (name weighted 10x over description), then shorter name, then name.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Package>> {
+        let terms: Vec<&str> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let last = terms.len() - 1;
+        let fts_query = terms
+            .iter()
+            .enumerate()
+            .map(|(i, t)| if i == last { format!("\"{t}\"*") } else { format!("\"{t}\"") })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let columns = COLUMNS
+            .split(", ")
+            .map(|c| format!("p.{}", c.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {columns} FROM packages_fts \
+             JOIN packages p ON p.id = packages_fts.rowid \
+             WHERE packages_fts MATCH ?1 \
+             ORDER BY lower(p.name) = lower(?2) DESC, \
+                      substr(lower(p.name), 1, length(?2)) = lower(?2) DESC, \
+                      bm25(packages_fts, 10.0, 1.0), length(p.name), p.name \
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![fts_query, query.trim(), i64::try_from(limit).unwrap_or(i64::MAX)],
+            row_to_package,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn count(&self) -> Result<usize> {
         let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))?;
         Ok(n as usize)
@@ -233,5 +276,101 @@ mod tests {
             idx.replace_source(&sid("a"), &[pkg("a", "x", "d"), pkg("a", "y", "d")]).unwrap();
         }
         assert_eq!(Index::open(&path).unwrap().count().unwrap(), 2);
+    }
+
+    fn indexed(packages: &[Package]) -> Index {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.replace_source(&sid("a"), packages).unwrap();
+        idx
+    }
+
+    fn names(found: Vec<Package>) -> Vec<String> {
+        found.into_iter().map(|p| p.name).collect()
+    }
+
+    #[test]
+    fn search_finds_by_name_prefix() {
+        let idx = indexed(&[
+            pkg("a", "firefox", "browser"),
+            pkg("a", "firefox-i18n-fr", "french"),
+            pkg("a", "git", "vcs"),
+        ]);
+        let mut found = names(idx.search("fire", 10).unwrap());
+        found.sort();
+        assert_eq!(found, ["firefox", "firefox-i18n-fr"]);
+    }
+
+    #[test]
+    fn exact_name_ranks_first() {
+        let idx = indexed(&[
+            pkg("a", "firefox-i18n-fr", "french"),
+            pkg("a", "firefox-developer-edition", "dev"),
+            pkg("a", "firefox", "browser"),
+        ]);
+        assert_eq!(idx.search("firefox", 10).unwrap()[0].name, "firefox");
+    }
+
+    fn long_description() -> String {
+        vec!["word"; 60].join(" ")
+    }
+
+    #[test]
+    fn exact_name_beats_a_stronger_text_match() {
+        // bm25 normalises by document length, so on its own the short competitor would win.
+        let idx = indexed(&[
+            pkg("a", "firefox-nightly", "firefox"),
+            pkg("a", "firefox", &long_description()),
+        ]);
+        assert_eq!(idx.search("firefox", 10).unwrap()[0].name, "firefox");
+    }
+
+    #[test]
+    fn name_prefix_beats_a_stronger_text_match() {
+        let idx = indexed(&[
+            pkg("a", "my-git-thing", "git"),
+            pkg("a", "git-lfs", &long_description()),
+        ]);
+        assert_eq!(idx.search("git", 10).unwrap()[0].name, "git-lfs");
+    }
+
+    #[test]
+    fn search_matches_description() {
+        let idx = indexed(&[pkg("a", "git", "the fast distributed version control system")]);
+        assert_eq!(names(idx.search("distributed", 10).unwrap()), ["git"]);
+    }
+
+    #[test]
+    fn search_requires_all_terms() {
+        let idx = indexed(&[pkg("a", "git", "the fast distributed version control system")]);
+        assert_eq!(names(idx.search("fast distributed", 10).unwrap()), ["git"]);
+        assert!(idx.search("fast banana", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_is_case_and_accent_insensitive() {
+        let idx = indexed(&[pkg("a", "editor-pt", "Editor de ação")]);
+        assert_eq!(names(idx.search("ACAO", 10).unwrap()), ["editor-pt"]);
+    }
+
+    #[test]
+    fn search_survives_fts_syntax() {
+        let idx = indexed(&[pkg("a", "firefox", "browser"), pkg("a", "c", "compiler")]);
+        for q in ["\"", "firefox\"", "a AND", "(", "foo:bar", "-x", "*", "NEAR(", "c++"] {
+            assert!(idx.search(q, 10).is_ok(), "query {q:?} errored");
+        }
+    }
+
+    #[test]
+    fn empty_query_returns_nothing() {
+        let idx = indexed(&[pkg("a", "firefox", "browser")]);
+        assert!(idx.search("", 10).unwrap().is_empty());
+        assert!(idx.search("   ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let many: Vec<Package> = (0..20).map(|i| pkg("a", &format!("tool-{i}"), "tool")).collect();
+        let idx = indexed(&many);
+        assert_eq!(idx.search("tool", 5).unwrap().len(), 5);
     }
 }
