@@ -1,0 +1,17 @@
+[package]
+name = "store-backend-pacman"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Read-only pacman backend for linux-store, via libalpm"
+
+[dependencies]
+store-core = { path = "../../core" }
+alpm = "5.0.2"
+alpm-utils = "5.0.0"
+pacmanconf = "3.1.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tar = "0.4.46"
+flate2 = "1.1.11"
