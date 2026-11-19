@@ -75,7 +75,14 @@ impl Backend for PacmanBackend {
         let mut packages = Vec::new();
 
         for db in alpm.syncdbs() {
-            for p in db.pkgs() {
+            let pkgs = db.pkgs();
+            // libalpm hands back an empty list for a missing or corrupt sync database and only
+            // records the reason in the handle's errno (`Db::is_valid` stays Ok). Treat that as
+            // a failure, otherwise a refresh would silently wipe the repo's catalog.
+            if pkgs.is_empty() && !alpm.last_error().ok() {
+                return Err(backend_error(format!("repository {}: {}", db.name(), alpm.last_error())));
+            }
+            for p in pkgs {
                 // The first repo wins when a name appears in several, like pacman itself.
                 if !seen.insert(p.name().to_string()) {
                     continue;

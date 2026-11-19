@@ -45,9 +45,17 @@ impl Index {
         Index::init(Connection::open_in_memory()?)
     }
 
+    /// Creates the schema only for a brand-new database. Opening an existing index must not
+    /// write, otherwise a reader (a search) would wait for any concurrent refresh.
     fn init(conn: Connection) -> Result<Index> {
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if found > SCHEMA_VERSION {
+            return Err(Error::UnsupportedIndexVersion { found, supported: SCHEMA_VERSION });
+        }
+        if found == 0 {
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Index { conn })
     }
 
@@ -372,5 +380,40 @@ mod tests {
         let many: Vec<Package> = (0..20).map(|i| pkg("a", &format!("tool-{i}"), "tool")).collect();
         let idx = indexed(&many);
         assert_eq!(idx.search("tool", 5).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn opening_an_existing_index_does_not_need_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let mut idx = Index::open(&path).unwrap();
+            idx.replace_source(&sid("a"), &[pkg("a", "firefox", "browser")]).unwrap();
+        }
+        // Another process (a refresh) holds the write lock.
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let reader = Index::open(&path).expect("open must not block on the writer");
+        assert_eq!(names(reader.search("firefox", 10).unwrap()), ["firefox"]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn opening_a_newer_index_is_refused_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        drop(Index::open(&path).unwrap());
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        let err = Index::open(&path).err().expect("a newer schema must be refused");
+        assert!(matches!(err, Error::UnsupportedIndexVersion { found: 99, .. }), "{err:?}");
+        let version: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 99);
     }
 }

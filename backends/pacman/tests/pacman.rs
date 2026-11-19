@@ -60,6 +60,25 @@ fn missing_db_is_unavailable_not_a_panic() {
 }
 
 #[test]
+fn corrupt_sync_db_is_an_error_not_an_empty_catalog() {
+    let fx = fixture::build();
+    std::fs::write(fx.db_path().join("sync/core.db"), "garbage").unwrap();
+    let backend = PacmanBackend::with_paths(&fx.root().join("root"), &fx.db_path(), &["core"]);
+    match backend.packages() {
+        Err(store_core::Error::Backend { message, .. }) => assert!(message.contains("core"), "{message}"),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_sync_db_is_an_error_not_an_empty_catalog() {
+    let fx = fixture::build();
+    std::fs::remove_file(fx.db_path().join("sync/core.db")).unwrap();
+    let backend = PacmanBackend::with_paths(&fx.root().join("root"), &fx.db_path(), &["core"]);
+    assert!(matches!(backend.packages(), Err(store_core::Error::Backend { .. })));
+}
+
+#[test]
 #[ignore = "reads the real system pacman databases; run manually"]
 fn real_system_smoke() {
     let packages = PacmanBackend::from_system().packages().unwrap();

@@ -12,6 +12,9 @@ pub enum Error {
     /// A package handed to the index belongs to a different source than the one being replaced.
     #[error("package from source {found} given while replacing source {expected}")]
     SourceMismatch { expected: SourceId, found: SourceId },
+    /// The index file was written by a newer version of linux-store.
+    #[error("index schema version {found} is newer than the supported version {supported}")]
+    UnsupportedIndexVersion { found: i64, supported: i64 },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
