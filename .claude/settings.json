@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "slint@slint": true,
+    "rust-analyzer-lsp@anthropic-plugin-directory": true
+  }
+}

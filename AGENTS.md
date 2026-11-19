@@ -36,6 +36,24 @@ cargo build
 cargo run
 ```
 
+## Known issue: plain `cargo run` can freeze the dev machine
+
+On the main dev laptop (NVIDIA RTX 4050 + AMD 680M, Wayland/niri, nvidia 620.70.06),
+a plain `cargo run` hard-froze the whole system (mouse stuck, forced reboot, nothing in
+the journal). Slint's default renderer (femtovg, OpenGL) most likely opened its EGL
+context through the NVIDIA driver. Not reproduced on purpose, so treat it as a strong
+suspicion. Both of these ran fine:
+
+```sh
+# Mesa/AMD EGL only (keeps NVIDIA out of it)
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json cargo run
+
+# CPU rendering
+SLINT_BACKEND=winit-software cargo run
+```
+
+Use one of these on that machine until the NVIDIA/EGL problem is understood.
+
 ## Live Preview
 
 While you work on the UI, build and run the application with live preview.
