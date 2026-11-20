@@ -1,0 +1,14 @@
+[package]
+name = "store-backend-flatpak"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Read-only Flatpak backend for linux-store, from the AppStream catalog"
+
+[dependencies]
+store-core = { path = "../../core" }
+quick-xml = "0.41.0"
+flate2 = "1.1.11"
+
+[dev-dependencies]
+tempfile = "3.27.0"

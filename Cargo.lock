@@ -4482,6 +4482,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "store-backend-flatpak"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "quick-xml",
+ "store-core",
+ "tempfile",
+]
+
+[[package]]
 name = "store-backend-pacman"
 version = "0.1.0"
 dependencies = [

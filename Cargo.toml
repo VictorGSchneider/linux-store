@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["gui", "core", "backends/pacman", "backends/aur", "cli"]
+members = ["gui", "core", "backends/pacman", "backends/aur", "backends/flatpak", "cli"]
 
 [profile.release]
 codegen-units = 1
