@@ -32,6 +32,25 @@ pub fn install(
                 ),
             ));
         }
+        // Installing on top of newer databases than the system is a partial upgrade, which Arch
+        // does not support: ask for an upgrade first.
+        let pending = txn::pending_upgrades(alpm);
+        if !pending.is_empty() {
+            let shown: Vec<&str> = pending.iter().take(10).map(String::as_str).collect();
+            let more = pending.len().saturating_sub(shown.len());
+            return Err(HelperError::new(
+                ErrorCode::UpgradeNeeded,
+                format!(
+                    "the system has pending upgrades ({}{}); upgrade first, because installing on top of newer package databases is a partial upgrade",
+                    shown.join(", "),
+                    if more > 0 {
+                        format!(" and {more} more")
+                    } else {
+                        String::new()
+                    }
+                ),
+            ));
+        }
         for name in packages {
             let added = {
                 let pkg = alpm
@@ -316,5 +335,73 @@ mod tests {
         );
         assert_eq!(package_from_filename("core.db"), None);
         assert_eq!(package_from_filename("weird.pkg.tar.zst"), None);
+    }
+
+    #[test]
+    fn progress_events_never_carry_an_empty_package_name() {
+        let fx = world();
+        let (emitter, events) = collecting();
+        install(&fx.env(), &names(&["app"]), &emitter, &gate()).unwrap();
+        let empty = events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, Event::Progress { package: Some(p), .. } if p.is_empty()))
+            .count();
+        assert_eq!(
+            empty, 0,
+            "libalpm reports verify steps without a package name"
+        );
+    }
+
+    #[test]
+    fn install_is_refused_while_the_databases_are_ahead_of_the_system() {
+        // Installing on top of newer package databases is a partial upgrade.
+        let fx = Fixture::new();
+        fx.publish("hello", "1.0-1", &[]);
+        fx.sync();
+        install(&fx.env(), &names(&["hello"]), &collecting().0, &gate()).unwrap();
+        fx.publish("hello", "2.0-1", &[]);
+        fx.publish("other", "1.0-1", &[]);
+        fx.sync(); // a plain `pacman -Sy`: the databases are now ahead of the installed system
+        let err = install(&fx.env(), &names(&["other"]), &collecting().0, &gate()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UpgradeNeeded, "{}", err.message);
+        assert!(err.message.contains("hello"), "{}", err.message);
+        assert_eq!(fx.installed(), ["hello-1.0-1"]);
+        assert!(!fx.lock_exists());
+    }
+
+    #[test]
+    fn ignored_packages_do_not_block_installs() {
+        let fx = Fixture::new();
+        fx.publish("hello", "1.0-1", &[]);
+        fx.sync();
+        install(&fx.env(), &names(&["hello"]), &collecting().0, &gate()).unwrap();
+        fx.publish("hello", "2.0-1", &[]);
+        fx.publish("other", "1.0-1", &[]);
+        fx.sync();
+        let env = fx.env().ignoring(&["hello"]); // IgnorePkg = hello
+        install(&env, &names(&["other"]), &collecting().0, &gate()).unwrap();
+        assert_eq!(fx.installed(), ["hello-1.0-1", "other-1.0-1"]);
+    }
+
+    #[test]
+    fn a_corrupted_cached_package_is_deleted_so_the_next_try_can_download_it_again() {
+        // A bad file already sitting in the cache (an interrupted earlier download) makes every
+        // attempt fail the same way unless it is deleted. libalpm asks whether to delete it.
+        let fx = Fixture::new();
+        fx.publish("broken", "1.0-1", &[]);
+        fx.sync();
+        fx.put_in_cache("broken-1.0-1-any.pkg.tar.zst", b"not a package at all");
+        let err = install(&fx.env(), &names(&["broken"]), &collecting().0, &gate()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Failed, "{}", err.message);
+        assert!(fx.installed().is_empty());
+        assert!(
+            fx.cache_file_modes().is_empty(),
+            "the corrupted file must be gone: {:?}",
+            fx.cache_file_modes()
+        );
+        // And the retry works, because the package is downloaded again.
+        install(&fx.env(), &names(&["broken"]), &collecting().0, &gate()).unwrap();
+        assert_eq!(fx.installed(), ["broken-1.0-1"]);
     }
 }

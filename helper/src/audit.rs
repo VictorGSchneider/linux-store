@@ -1,5 +1,5 @@
 //! Every privileged request leaves a line in the system journal: who asked and for what.
-use store_protocol::Request;
+use store_protocol::{ErrorCode, Request};
 
 /// `uid=1000 op=install packages=tree,sl`. The uid comes from `PKEXEC_UID`; anything that is not
 /// all digits is shown as `unknown`, so it can never forge extra fields. Package names were
@@ -17,6 +17,36 @@ pub fn audit_line(caller_uid: Option<&str>, request: &Request) -> String {
         }
         Request::Upgrade => format!("uid={uid} op=upgrade"),
         Request::Cancel => format!("uid={uid} op=cancel"),
+    }
+}
+
+/// How an operation ended, for the second audit line.
+pub enum AuditOutcome {
+    Ok { changes: usize },
+    Error(ErrorCode),
+}
+
+/// `uid=1000 op=install result=ok changes=2` or `... result=error code=conflict`: the audit trail
+/// says what was asked (before) and what came of it (after).
+pub fn audit_outcome_line(
+    caller_uid: Option<&str>,
+    request: &Request,
+    outcome: &AuditOutcome,
+) -> String {
+    let uid = caller_uid
+        .filter(|u| !u.is_empty() && u.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or("unknown");
+    let op = match request {
+        Request::Install { .. } => "install",
+        Request::Remove { .. } => "remove",
+        Request::Upgrade => "upgrade",
+        Request::Cancel => "cancel",
+    };
+    match outcome {
+        AuditOutcome::Ok { changes } => format!("uid={uid} op={op} result=ok changes={changes}"),
+        AuditOutcome::Error(code) => {
+            format!("uid={uid} op={op} result=error code={}", code.as_str())
+        }
     }
 }
 
@@ -82,5 +112,29 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn audit_outcome_line_records_the_result() {
+        use store_protocol::ErrorCode;
+        let install = Request::Install {
+            packages: vec!["tree".into()],
+        };
+        assert_eq!(
+            audit_outcome_line(Some("1000"), &install, &AuditOutcome::Ok { changes: 2 }),
+            "uid=1000 op=install result=ok changes=2"
+        );
+        assert_eq!(
+            audit_outcome_line(
+                Some("1000"),
+                &install,
+                &AuditOutcome::Error(ErrorCode::Conflict)
+            ),
+            "uid=1000 op=install result=error code=conflict"
+        );
+        assert_eq!(
+            audit_outcome_line(None, &Request::Upgrade, &AuditOutcome::Ok { changes: 0 }),
+            "uid=unknown op=upgrade result=ok changes=0"
+        );
     }
 }

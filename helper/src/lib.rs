@@ -17,7 +17,7 @@ mod upgrade;
 mod fixture;
 
 pub use abort::ProcessAborter;
-pub use audit::{audit, audit_line};
+pub use audit::{AuditOutcome, audit, audit_line, audit_outcome_line};
 pub use env::Environment;
 pub use error::HelperError;
 pub use events::Emitter;
@@ -26,5 +26,5 @@ pub use harden::harden_process;
 pub use install::install;
 pub use protect::protected_packages;
 pub use remove::remove;
-pub use serve::{ensure_root, serve};
+pub use serve::{ensure_root, serve, serve_with};
 pub use upgrade::upgrade;

@@ -45,6 +45,27 @@ pub enum ErrorCode {
     Cancelled,
     TooLate,
     Failed,
+    /// The package databases are ahead of the installed system: installing now would be a
+    /// partial upgrade. Run an upgrade first.
+    UpgradeNeeded,
+}
+
+impl ErrorCode {
+    /// The `snake_case` name used in the JSON protocol, for logs and messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::InvalidRequest => "invalid_request",
+            ErrorCode::NotFound => "not_found",
+            ErrorCode::Conflict => "conflict",
+            ErrorCode::Locked => "locked",
+            ErrorCode::Protected => "protected",
+            ErrorCode::DependencyBroken => "dependency_broken",
+            ErrorCode::Cancelled => "cancelled",
+            ErrorCode::TooLate => "too_late",
+            ErrorCode::Failed => "failed",
+            ErrorCode::UpgradeNeeded => "upgrade_needed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +210,7 @@ mod tests {
             ErrorCode::Cancelled,
             ErrorCode::TooLate,
             ErrorCode::Failed,
+            ErrorCode::UpgradeNeeded,
         ]
         .iter()
         .map(|c| serde_json::to_string(c).unwrap())
@@ -204,7 +226,8 @@ mod tests {
                 "\"dependency_broken\"",
                 "\"cancelled\"",
                 "\"too_late\"",
-                "\"failed\""
+                "\"failed\"",
+                "\"upgrade_needed\""
             ]
         );
     }
@@ -217,5 +240,26 @@ mod tests {
         let mut big = b"{\"event\":\"cancel_ignored\"}".to_vec();
         big.resize(crate::MAX_REQUEST_BYTES + 1, b' ');
         assert!(Event::parse(&big).is_err());
+    }
+
+    #[test]
+    fn error_code_as_str_matches_the_json_names() {
+        for code in [
+            ErrorCode::InvalidRequest,
+            ErrorCode::NotFound,
+            ErrorCode::Conflict,
+            ErrorCode::Locked,
+            ErrorCode::Protected,
+            ErrorCode::DependencyBroken,
+            ErrorCode::Cancelled,
+            ErrorCode::TooLate,
+            ErrorCode::Failed,
+            ErrorCode::UpgradeNeeded,
+        ] {
+            assert_eq!(
+                format!("\"{}\"", code.as_str()),
+                serde_json::to_string(&code).unwrap()
+            );
+        }
     }
 }

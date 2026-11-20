@@ -115,6 +115,11 @@ impl Fixture {
         }
     }
 
+    /// Puts a file straight into the package cache, as an interrupted download would.
+    pub(crate) fn put_in_cache(&self, file_name: &str, content: &[u8]) {
+        fs::write(self.path("cache").join(file_name), content).unwrap();
+    }
+
     /// Makes the system's sync database match the repository, like a finished `pacman -Sy`.
     pub(crate) fn sync(&self) {
         let target = self.path("db/sync/test.db");

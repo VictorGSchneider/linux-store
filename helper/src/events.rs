@@ -26,6 +26,8 @@ impl Emitter {
 /// Questions libalpm asked that this helper will not answer "yes" to.
 #[derive(Default)]
 pub(crate) struct QuestionLog {
+    /// A package signature key that is not trusted was met (the helper never imports keys).
+    pub unknown_key: bool,
     /// Dependencies with several providers: the helper never picks one silently.
     pub ambiguous: Vec<String>,
 }
@@ -111,6 +113,11 @@ pub(crate) fn attach(
                 Progress::RemoveStart => Stage::Remove,
                 _ => Stage::Verify,
             };
+            // libalpm reports its verify steps with an empty name; the stage start event already
+            // told the client what is happening.
+            if name.is_empty() {
+                return;
+            }
             let percent = percent.clamp(0, 100) as u8;
             if throttle.borrow_mut().changed(stage, name, percent) {
                 emitter.emit(progress(stage, Some(name), Some(percent)));
@@ -147,7 +154,9 @@ pub(crate) fn attach(
             Question::InstallIgnorepkg(mut q) => q.set_install(false),
             Question::Replace(q) => q.set_replace(false),
             Question::Conflict(mut q) => q.set_remove(false),
-            Question::Corrupted(mut q) => q.set_remove(false),
+            // A package that failed verification is deleted from the cache (as pacman does by
+            // default), so the next attempt downloads it again instead of failing the same way.
+            Question::Corrupted(mut q) => q.set_remove(true),
             Question::RemovePkgs(mut q) => q.set_skip(false),
             Question::SelectProvider(mut q) => {
                 log.borrow_mut()
@@ -155,7 +164,10 @@ pub(crate) fn attach(
                     .push("a dependency has several providers".to_string());
                 q.set_index(0);
             }
-            Question::ImportKey(mut q) => q.set_import(false),
+            Question::ImportKey(mut q) => {
+                log.borrow_mut().unknown_key = true;
+                q.set_import(false);
+            }
         }
     });
 

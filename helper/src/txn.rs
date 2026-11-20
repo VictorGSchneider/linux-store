@@ -84,8 +84,32 @@ fn transact(
     let committed = alpm.trans_commit();
     // The lock is released right after this, whatever happened: a cancel from here on is too late.
     gate.commit_finished();
-    committed.map_err(|e| map_error(e.error(), "the transaction failed"))?;
+    committed.map_err(|e| {
+        let mut error = map_error(e.error(), "the transaction failed");
+        if questions.borrow().unknown_key {
+            error.message.push_str(
+                "; a package signature key is not trusted: import it with pacman-key and retry",
+            );
+        }
+        error
+    })?;
     Ok(plan)
+}
+
+/// Installed packages (not ignored by `IgnorePkg`) that the sync databases have a newer version
+/// of. A non-empty list means the databases are ahead of the system, so installing anything on
+/// top of them would be a partial upgrade.
+pub(crate) fn pending_upgrades(alpm: &Alpm) -> Vec<String> {
+    let mut pending: Vec<String> = alpm
+        .localdb()
+        .pkgs()
+        .iter()
+        .filter(|pkg| !pkg.should_ignore())
+        .filter(|pkg| pkg.sync_new_version(alpm.syncdbs()).is_some())
+        .map(|pkg| pkg.name().to_string())
+        .collect();
+    pending.sort();
+    pending
 }
 
 /// What the prepared transaction is going to do.

@@ -28,6 +28,7 @@ struct TestPaths {
     hook_dir: PathBuf,
     repos: Vec<(String, String)>,
     archs: Vec<String>,
+    ignored: Vec<String>,
 }
 
 fn failed(message: String) -> HelperError {
@@ -67,8 +68,18 @@ impl Environment {
                     .map(|(n, u)| (n.to_string(), u.to_string()))
                     .collect(),
                 archs: archs.iter().map(|a| a.to_string()).collect(),
+                ignored: Vec::new(),
             }),
         }
+    }
+
+    /// Like `IgnorePkg` in pacman.conf (tests only).
+    #[cfg(test)]
+    pub(crate) fn ignoring(mut self, names: &[&str]) -> Environment {
+        if let Kind::Paths(t) = &mut self.kind {
+            t.ignored = names.iter().map(|n| n.to_string()).collect();
+        }
+        self
     }
 
     /// An environment that panics if libalpm is ever opened, to prove a request never got there.
@@ -104,6 +115,9 @@ impl Environment {
                     .map_err(fail)?;
                 for arch in &t.archs {
                     alpm.add_architecture(arch.as_str()).map_err(fail)?;
+                }
+                for name in &t.ignored {
+                    alpm.add_ignorepkg(name.as_str()).map_err(fail)?;
                 }
                 for (name, url) in &t.repos {
                     let db = alpm
