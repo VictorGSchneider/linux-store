@@ -1,0 +1,16 @@
+[package]
+name = "store-backend-aur"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Read-only AUR backend for linux-store, from the official metadata dump"
+
+[dependencies]
+store-core = { path = "../../core" }
+ureq = "3.5.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+flate2 = "1.1.11"
+
+[dev-dependencies]
+tempfile = "3.27.0"
