@@ -508,7 +508,8 @@ mod tests {
             title: Some("Firefox".into()),
             ..pkg("a", "org.mozilla.firefox", "browser")
         };
-        idx.replace_source(&sid("a"), &[p.clone()]).unwrap();
+        idx.replace_source(&sid("a"), std::slice::from_ref(&p))
+            .unwrap();
         assert_eq!(idx.get(&sid("a"), "org.mozilla.firefox").unwrap(), Some(p));
     }
 
