@@ -4523,6 +4523,8 @@ dependencies = [
  "store-backend-flatpak",
  "store-backend-pacman",
  "store-core",
+ "store-installer-pkexec",
+ "store-protocol",
  "tempfile",
 ]
 
@@ -4553,6 +4555,7 @@ dependencies = [
 name = "store-installer-pkexec"
 version = "0.1.0"
 dependencies = [
+ "quick-xml",
  "store-core",
  "store-protocol",
  "tempfile",

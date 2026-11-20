@@ -12,9 +12,10 @@ Think Microsoft Store, App Store or Play Store, but open, light, and not tied to
 single package format.
 
 > **Status: early development.** The core, the search index and read-only pacman, AUR
-> and Flatpak backends work and can be tried from the `store` command line (see below);
-> the GUI is still a placeholder window and nothing can be installed yet. See
-> [Roadmap](#roadmap).
+> and Flatpak backends work and can be tried from the `store` command line (see below).
+> A privileged helper can install, remove and upgrade pacman packages (see below, and note
+> that its real-password check has not been done yet); the GUI is still a placeholder window.
+> See [Roadmap](#roadmap).
 
 ## Why
 
@@ -67,7 +68,7 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 1. `core`, the SQLite index and the pacman backend, with a test CLI
 2. AUR and Flatpak backends (read-only: done)
 3. The Slint GUI: search, app pages, install/remove, updates
-4. Privileged helper (polkit)
+4. Privileged helper (polkit): written and tested with fixtures, awaiting the manual check
 5. apt and dnf backends
 6. Snap, AppImage, firmware (fwupd), drivers, language package managers
 
@@ -79,7 +80,11 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 | `backends/pacman/` | Read-only pacman backend (libalpm) |
 | `backends/aur/` | Read-only AUR backend (official metadata dump, streamed) |
 | `backends/flatpak/` | Read-only Flatpak backend (AppStream catalog) |
-| `cli/` | `store` command line: `refresh`, `search`, `installed` (used to verify the core) |
+| `protocol/` | `store-protocol`: the one-line JSON requests and events, and all input validation |
+| `helper/` | `store-helper`: the privileged helper (libalpm transactions); the only code that runs as root |
+| `installers/pkexec/` | `Installer` implementation that runs the helper through `pkexec` |
+| `packaging/` | The polkit policy and the dev install and check scripts |
+| `cli/` | `store` command line: `refresh`, `search`, `installed`, `install`, `remove`, `upgrade` |
 | `gui/` | The Slint application |
 | `docs/` | Design documents |
 | `legacy/` | The original bash/yad `stoa-store`, kept as reference only |
@@ -115,10 +120,28 @@ cargo run --release -p store-cli -- search firefox
 cargo run --release -p store-cli -- installed
 ```
 
-Read-only: it never installs, removes or writes to pacman's or Flatpak's data. The AUR
-dump is downloaded on every refresh (about 15 MB). On an Arch system with about 145,000
+`refresh`, `search` and `installed` are read-only: they never write to pacman's or Flatpak's
+data. The AUR dump is downloaded on every refresh (about 15 MB). On an Arch system with about 145,000
 packages in total (pacman, Flatpak and the AUR), refresh takes about 5 seconds, mostly the
 download, and a typical search about 10 ms.
+
+### Changing the system (needs the helper)
+
+`store install <names>`, `store remove <names>` and `store upgrade` change the system through a
+small root helper started with `pkexec`. They need the helper installed first, which puts two
+root-owned files on your machine (a binary and a polkit policy):
+
+```sh
+cargo build --release -p store-helper -p store-cli
+sudo sh packaging/dev-install.sh        # installs them; undo with packaging/dev-uninstall.sh
+cargo run --release -p store-cli -- install tree
+```
+
+The password is asked once and remembered for about five minutes by the process that asked.
+`packaging/manual-check.sh` walks through installing and removing two tiny packages to check
+the real prompt. The helper accepts only package names (never paths or options), refuses to
+remove `pacman`, `base` and what `base` needs, and refreshes the package databases only as
+part of an upgrade, never alone.
 
 ## Continuous integration
 

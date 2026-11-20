@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>linux-store</vendor>
+
+  <!-- One action for the whole helper: pkexec ties an action to the program path.
+       auth_admin_keep remembers the password for a few minutes, but only for the process
+       that asked (another process has to authenticate again). -->
+  <action id="org.linuxstore.helper.run">
+    <description>Install, remove or upgrade software with linux-store</description>
+    <message>Authentication is required to change the installed software</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/linux-store/store-helper</annotate>
+  </action>
+</policyconfig>

@@ -9,8 +9,21 @@ This file may be older than the code. Where they disagree, trust the code, and u
 Cargo workspace: `core/` (package `store-core`; not named `core`, which would collide with Rust's
 `core`), `backends/pacman/`, `backends/aur/` and `backends/flatpak/` (packages
 `store-backend-pacman`, `-aur`, `-flatpak`), `cli/` (package `store-cli`, binary
-`store`) and `gui/` (the Slint app). Planned: more `backends/*` and `helper`.
+`store`), `protocol/` (`store-protocol`), `helper/` (`store-helper`, the only code that runs as
+root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/` and `gui/` (the Slint app).
+Planned: more `backends/*`.
 Run the core's tests with `cargo test --workspace --features store-core/testing`.
+
+## The privileged helper: never run it from an agent
+
+`store-helper`, `pkexec`, `sudo` and `store install|remove|upgrade` change the real system or
+raise password prompts. Agents must not run them. The helper's tests use a temporary root and a
+`file://` repository (they need `bsdtar`, `zstd` and `repo-add`); the only privileged check is
+`packaging/manual-check.sh`, which the user runs after `sudo sh packaging/dev-install.sh`.
+Build the helper with `--release`: the `alpm` crate trips an alignment check in debug builds
+(see `[profile.dev.package.alpm]` in the root `Cargo.toml`). The test-only paths (`--root`,
+`--dbpath`) exist only under `#[cfg(test)]` in `helper/`; never add a flag, feature or
+environment variable that exposes them.
 `legacy/` holds the old bash `stoa-store`; use it as reference only.
 
 ## Install the Slint Plugin

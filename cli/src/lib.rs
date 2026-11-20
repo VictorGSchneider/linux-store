@@ -1,10 +1,11 @@
-//! `store`: a small CLI over `store-core`, used to refresh, search and list packages.
+//! `store`: a small CLI over `store-core`: refresh, search, list, and install, remove or upgrade.
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use store_core::{Outcome, Package, Store};
+use store_core::{CancelToken, InstallError, Installer, Outcome, Package, Store};
+use store_protocol::{ChangeKind, Event, Operation, Request, Stage, is_valid_name};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +34,18 @@ enum Command {
     },
     /// List installed packages.
     Installed,
+    /// Install packages from the configured repositories (asks for your password).
+    Install {
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// Remove installed packages (asks for your password).
+    Remove {
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// Refresh the package databases and upgrade the whole system (asks for your password).
+    Upgrade,
 }
 
 /// `$XDG_CACHE_HOME/linux-store/index.db`, else `$HOME/.cache/linux-store/index.db`.
@@ -75,6 +88,7 @@ fn format_package(p: &Package) -> String {
 pub fn run<W: Write, E: Write>(
     args: &[String],
     make_store: impl FnOnce(&Path) -> store_core::Result<Store>,
+    installer: &dyn Installer,
     out: &mut W,
     err: &mut E,
 ) -> i32 {
@@ -91,6 +105,21 @@ pub fn run<W: Write, E: Write>(
             return code;
         }
     };
+
+    // Changing the system never needs the search index, so it is not even opened.
+    let request = match &cli.command {
+        Command::Install { packages } => Some(Request::Install {
+            packages: packages.clone(),
+        }),
+        Command::Remove { packages } => Some(Request::Remove {
+            packages: packages.clone(),
+        }),
+        Command::Upgrade => Some(Request::Upgrade),
+        _ => None,
+    };
+    if let Some(request) = request {
+        return run_installer(&request, installer, out, err);
+    }
 
     let Some(db_path) = cli.db.or_else(default_db_path) else {
         let _ = writeln!(
@@ -144,6 +173,118 @@ pub fn run<W: Write, E: Write>(
             print_packages(store.search(&query.join(" "), limit), out, err)
         }
         Command::Installed => print_packages(store.installed(), out, err),
+        Command::Install { .. } | Command::Remove { .. } | Command::Upgrade => {
+            unreachable!("handled before the index is opened")
+        }
+    }
+}
+
+fn operation_name(op: Operation) -> &'static str {
+    match op {
+        Operation::Install => "install",
+        Operation::Remove => "remove",
+        Operation::Upgrade => "upgrade",
+    }
+}
+
+fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Refresh => "refresh",
+        Stage::Resolve => "resolve",
+        Stage::Download => "download",
+        Stage::Verify => "verify",
+        Stage::Install => "install",
+        Stage::Upgrade => "upgrade",
+        Stage::Remove => "remove",
+    }
+}
+
+/// One line for an event, or `None` for the ones reported another way (errors come back as the
+/// result of the run and are printed once, on stderr).
+fn describe(event: &Event) -> Option<String> {
+    match event {
+        Event::Started { op } => Some(format!("started {}", operation_name(*op))),
+        Event::Progress {
+            stage,
+            package,
+            percent,
+        } => {
+            let mut line = format!("[{}]", stage_name(*stage));
+            if let Some(package) = package {
+                line.push_str(&format!(" {package}"));
+            }
+            if let Some(percent) = percent {
+                line.push_str(&format!(" {percent}%"));
+            }
+            Some(line)
+        }
+        Event::Done { changes } if changes.is_empty() => Some("done: nothing to do".to_string()),
+        Event::Done { changes } => {
+            let parts: Vec<String> = changes
+                .iter()
+                .map(|c| {
+                    let verb = match c.kind {
+                        ChangeKind::Installed => "installed",
+                        ChangeKind::Removed => "removed",
+                        ChangeKind::Upgraded => "upgraded",
+                    };
+                    match &c.version {
+                        Some(version) => format!("{verb} {} {version}", c.package),
+                        None => format!("{verb} {}", c.package),
+                    }
+                })
+                .collect();
+            Some(format!("done: {}", parts.join(", ")))
+        }
+        Event::Error { .. } => None,
+        Event::CancelIgnored => Some("too late to cancel; finishing the operation".to_string()),
+    }
+}
+
+/// Runs an install, remove or upgrade request through the installer and prints its progress.
+fn run_installer<W: Write, E: Write>(
+    request: &Request,
+    installer: &dyn Installer,
+    out: &mut W,
+    err: &mut E,
+) -> i32 {
+    // A bad name is refused before the helper starts, so it never costs a password prompt.
+    if let Request::Install { packages } | Request::Remove { packages } = request
+        && let Some(bad) = packages.iter().find(|name| !is_valid_name(name))
+    {
+        let _ = writeln!(
+            err,
+            "store: invalid package name {bad:?} (names use lowercase letters, digits and @ . _ + -)"
+        );
+        return 1;
+    }
+    let mut last_line = String::new();
+    let result = installer.run(request, &CancelToken::default(), &mut |event| {
+        if let Some(line) = describe(&event)
+            && line != last_line
+        {
+            let _ = writeln!(out, "{line}");
+            last_line = line;
+        }
+    });
+    match result {
+        Ok(()) => 0,
+        Err(InstallError::Dismissed) => {
+            let _ = writeln!(err, "store: {}", InstallError::Dismissed);
+            126
+        }
+        Err(InstallError::NotAuthorized(text)) => {
+            let _ = writeln!(
+                err,
+                "store: not authorized: {text}\n\
+                 If no dialog appeared, a polkit authentication agent may not be running in your session."
+            );
+            127
+        }
+        Err(e) => {
+            let _ = writeln!(err, "store: {e}");
+            1
+        }
     }
 }
 

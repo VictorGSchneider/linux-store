@@ -2,8 +2,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use store_cli::{default_db_path_from, run};
-use store_core::testing::{FakeBackend, pkg};
-use store_core::{Index, Package, Store};
+use store_core::testing::{FakeBackend, FakeInstaller, pkg};
+use store_core::{Index, InstallError, Package, Store};
+use store_protocol::{Change, ChangeKind, ErrorCode, Event, Operation, Request, Stage};
 
 /// Runs the CLI against `db` with one fake backend; returns (exit code, stdout, stderr).
 fn run_cli(args: &[&str], backend: FakeBackend) -> (i32, String, String) {
@@ -12,9 +13,11 @@ fn run_cli(args: &[&str], backend: FakeBackend) -> (i32, String, String) {
         .map(String::from)
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
+    let installer = FakeInstaller::new(vec![], Ok(()));
     let code = run(
         &argv,
         move |path| Ok(Store::new(Index::open(path)?, vec![Box::new(backend)])),
+        &installer,
         &mut out,
         &mut err,
     );
@@ -160,6 +163,7 @@ fn refresh_reports_every_source() {
         .map(|s| s.to_string())
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
+    let installer = FakeInstaller::new(vec![], Ok(()));
     let code = run(
         &argv,
         |path| {
@@ -171,6 +175,7 @@ fn refresh_reports_every_source() {
                 ],
             ))
         },
+        &installer,
         &mut out,
         &mut err,
     );
@@ -178,4 +183,171 @@ fn refresh_reports_every_source() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("one: 1 packages"), "{out}");
     assert!(out.contains("two: unavailable"), "{out}");
+}
+
+/// Runs an install/remove/upgrade command against a fake installer; no index is involved.
+fn run_installer(args: &[&str], installer: &FakeInstaller) -> (i32, String, String) {
+    let argv: Vec<String> = std::iter::once("store")
+        .chain(args.iter().copied())
+        .map(String::from)
+        .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(
+        &argv,
+        |_| panic!("installing must not open the index"),
+        installer,
+        &mut out,
+        &mut err,
+    );
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+fn progress(stage: Stage, package: &str, percent: u8) -> Event {
+    Event::Progress {
+        stage,
+        package: Some(package.into()),
+        percent: Some(percent),
+    }
+}
+
+#[test]
+fn install_sends_the_request_and_prints_progress() {
+    let fake = FakeInstaller::new(
+        vec![
+            Event::Started {
+                op: Operation::Install,
+            },
+            progress(Stage::Download, "tree", 42),
+            progress(Stage::Install, "tree", 100),
+            Event::Done {
+                changes: vec![Change {
+                    package: "tree".into(),
+                    kind: ChangeKind::Installed,
+                    version: Some("2.3.2-1".into()),
+                }],
+            },
+        ],
+        Ok(()),
+    );
+    let (code, out, err) = run_installer(&["install", "tree", "sl"], &fake);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(
+        fake.requests(),
+        [Request::Install {
+            packages: vec!["tree".into(), "sl".into()]
+        }]
+    );
+    for expected in [
+        "started install",
+        "[download] tree 42%",
+        "[install] tree 100%",
+        "done: installed tree 2.3.2-1",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in {out}");
+    }
+}
+
+#[test]
+fn remove_and_upgrade_send_the_matching_requests() {
+    let fake = FakeInstaller::new(vec![Event::Done { changes: vec![] }], Ok(()));
+    let (code, out, _) = run_installer(&["remove", "tree"], &fake);
+    assert_eq!(code, 0);
+    assert!(out.contains("done: nothing to do"), "{out}");
+    let fake_again = FakeInstaller::new(vec![Event::Done { changes: vec![] }], Ok(()));
+    assert_eq!(run_installer(&["upgrade"], &fake_again).0, 0);
+    assert_eq!(
+        fake.requests(),
+        [Request::Remove {
+            packages: vec!["tree".into()]
+        }]
+    );
+    assert_eq!(fake_again.requests(), [Request::Upgrade]);
+}
+
+#[test]
+fn invalid_name_is_rejected_before_the_helper_runs() {
+    for args in [
+        &["install", "Tree"][..],
+        &["install", "a/b"],
+        &["remove", "--", "-x"],
+        &["install", "ok", "a b"],
+    ] {
+        let fake = FakeInstaller::new(vec![], Ok(()));
+        let (code, out, err) = run_installer(args, &fake);
+        assert_eq!(code, 1, "{args:?}");
+        assert_eq!(out, "");
+        assert!(err.contains("invalid package name"), "{err}");
+        assert!(fake.requests().is_empty(), "{args:?} reached the helper");
+    }
+}
+
+#[test]
+fn dismissed_exits_126_and_not_authorized_exits_127_with_a_hint() {
+    let dismissed = FakeInstaller::new(vec![], Err(InstallError::Dismissed));
+    let (code, _, err) = run_installer(&["upgrade"], &dismissed);
+    assert_eq!(code, 126);
+    assert!(err.contains("dismissed"), "{err}");
+    let denied = FakeInstaller::new(
+        vec![],
+        Err(InstallError::NotAuthorized("Not authorized".into())),
+    );
+    let (code, _, err) = run_installer(&["upgrade"], &denied);
+    assert_eq!(code, 127);
+    assert!(
+        err.contains("Not authorized") && err.contains("authentication agent"),
+        "{err}"
+    );
+}
+
+#[test]
+fn rejected_error_prints_the_message_and_exits_1() {
+    let fake = FakeInstaller::new(
+        vec![Event::Error {
+            code: ErrorCode::NotFound,
+            message: "not found: ghost".into(),
+        }],
+        Err(InstallError::Rejected {
+            code: ErrorCode::NotFound,
+            message: "not found: ghost".into(),
+        }),
+    );
+    let (code, out, err) = run_installer(&["install", "ghost"], &fake);
+    assert_eq!(code, 1);
+    assert!(err.contains("not found: ghost"), "{err}");
+    assert!(
+        !out.contains("ghost"),
+        "the error belongs on stderr only: {out}"
+    );
+}
+
+#[test]
+fn other_failures_exit_1() {
+    let fake = FakeInstaller::new(vec![], Err(InstallError::Protocol("garbage".into())));
+    let (code, _, err) = run_installer(&["upgrade"], &fake);
+    assert_eq!(code, 1);
+    assert!(err.contains("garbage"), "{err}");
+}
+
+#[test]
+fn progress_lines_are_throttled() {
+    let events: Vec<Event> = (0..100)
+        .map(|_| progress(Stage::Download, "tree", 42))
+        .collect();
+    let fake = FakeInstaller::new(events, Ok(()));
+    let (_, out, _) = run_installer(&["upgrade"], &fake);
+    assert_eq!(out.matches("[download] tree 42%").count(), 1, "{out}");
+}
+
+#[test]
+fn a_late_cancel_is_reported() {
+    let fake = FakeInstaller::new(
+        vec![Event::CancelIgnored, Event::Done { changes: vec![] }],
+        Ok(()),
+    );
+    let (_, out, _) = run_installer(&["upgrade"], &fake);
+    assert!(out.contains("too late to cancel"), "{out}");
 }
