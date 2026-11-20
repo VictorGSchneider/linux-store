@@ -351,3 +351,72 @@ fn a_late_cancel_is_reported() {
     let (_, out, _) = run_installer(&["upgrade"], &fake);
     assert!(out.contains("too late to cancel"), "{out}");
 }
+
+#[test]
+fn helper_text_cannot_inject_terminal_escapes() {
+    let evil = "evil\u{1b}[31m\u{1b}]0;pwned\u{7}";
+    let fake = FakeInstaller::new(
+        vec![
+            Event::Started {
+                op: Operation::Upgrade,
+            },
+            Event::Progress {
+                stage: Stage::Download,
+                package: Some(evil.into()),
+                percent: Some(10),
+            },
+            Event::Done {
+                changes: vec![Change {
+                    package: evil.into(),
+                    kind: ChangeKind::Installed,
+                    version: Some(evil.into()),
+                }],
+            },
+        ],
+        Err(InstallError::Rejected {
+            code: ErrorCode::Failed,
+            message: evil.into(),
+        }),
+    );
+    let (_, out, err) = run_installer(&["upgrade"], &fake);
+    for text in [&out, &err] {
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "raw control characters in {text:?}"
+        );
+    }
+    assert!(
+        out.contains("evil"),
+        "the readable part must survive: {out}"
+    );
+}
+
+#[test]
+fn search_output_cannot_inject_terminal_escapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    let backend = || {
+        FakeBackend::new(
+            "fake",
+            vec![pkg("fake", "alpha", "evil\u{1b}[2J description")],
+        )
+    };
+    run_cli(&["--db", &db, "refresh"], backend());
+    let (code, out, _) = run_cli(&["--db", &db, "search", "alpha"], backend());
+    assert_eq!(code, 0);
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(out.contains("description"), "{out}");
+}
+
+#[test]
+fn remove_progress_is_summarised() {
+    let events: Vec<Event> = (0..=100)
+        .map(|p| progress(Stage::Remove, "cowsay", p))
+        .collect();
+    let fake = FakeInstaller::new(events, Ok(()));
+    let (_, out, _) = run_installer(&["remove", "cowsay"], &fake);
+    let lines = out.lines().filter(|l| l.starts_with("[remove]")).count();
+    assert!(lines <= 12, "{lines} lines:\n{out}");
+    assert!(out.contains("[remove] cowsay 100%"), "{out}");
+    assert!(out.contains("[remove] cowsay 0%"), "{out}");
+}

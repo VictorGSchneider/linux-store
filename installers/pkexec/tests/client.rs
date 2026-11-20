@@ -34,9 +34,13 @@ fn run(installer: &PkexecInstaller, token: &CancelToken) -> (Result<(), InstallE
 #[test]
 fn system_command_is_pkexec_with_the_helper_path() {
     let system = PkexecInstaller::system();
+    // An absolute path: a PATH entry must not be able to stand in for pkexec.
     assert_eq!(
         system.command(),
-        [OsString::from("pkexec"), OsString::from(HELPER_PATH)]
+        [
+            OsString::from("/usr/bin/pkexec"),
+            OsString::from(HELPER_PATH)
+        ]
     );
     assert_eq!(HELPER_PATH, "/usr/lib/linux-store/store-helper");
 }
@@ -224,5 +228,45 @@ fn oversized_output_line_is_a_protocol_error() {
         started.elapsed() < Duration::from_secs(8),
         "took {:?}",
         started.elapsed()
+    );
+}
+
+/// Whether a process still has an entry in /proc (a zombie keeps its entry until reaped).
+fn process_entry_exists(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[test]
+fn an_abandoned_child_is_reaped_not_left_as_a_zombie() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    // Closes its output (so the client sees the end of the stream) but keeps running past the
+    // client's patience, the way a root helper that does not exit would.
+    let helper = script(
+        dir.path(),
+        "lingering",
+        &format!(
+            "read line\necho $$ > {}\nexec 1>&- 2>&-\nsleep 3",
+            pid_file.display()
+        ),
+    );
+    let installer = installer(&helper).with_exit_wait(Duration::from_millis(100));
+    let (result, _) = run(&installer, &CancelToken::default());
+    assert!(
+        matches!(result, Err(InstallError::Failed { .. })),
+        "{result:?}"
+    );
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_entry_exists(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !process_entry_exists(pid),
+        "process {pid} was left as a zombie"
     );
 }

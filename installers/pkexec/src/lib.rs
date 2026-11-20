@@ -16,19 +16,36 @@ pub const HELPER_PATH: &str = "/usr/lib/linux-store/store-helper";
 const STDERR_LIMIT: usize = 8 * 1024;
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// `pkexec` is looked up by absolute path: a directory that comes first in `PATH` must not be
+/// able to stand in for it.
+pub const PKEXEC_PATH: &str = "/usr/bin/pkexec";
+
 pub struct PkexecInstaller {
     command: Vec<OsString>,
+    exit_wait: Duration,
 }
 
 impl PkexecInstaller {
     /// `pkexec /usr/lib/linux-store/store-helper`.
     pub fn system() -> PkexecInstaller {
-        PkexecInstaller::with_command(vec![OsString::from("pkexec"), OsString::from(HELPER_PATH)])
+        PkexecInstaller::with_command(vec![
+            OsString::from(PKEXEC_PATH),
+            OsString::from(HELPER_PATH),
+        ])
     }
 
     /// Any command that speaks the helper protocol. The first element is the program.
     pub fn with_command(command: Vec<OsString>) -> PkexecInstaller {
-        PkexecInstaller { command }
+        PkexecInstaller {
+            command,
+            exit_wait: EXIT_WAIT,
+        }
+    }
+
+    /// How long to wait for the helper to exit once its output has ended (default 5 s).
+    pub fn with_exit_wait(mut self, wait: Duration) -> PkexecInstaller {
+        self.exit_wait = wait;
+        self
     }
 
     pub fn command(&self) -> &[OsString] {
@@ -88,15 +105,19 @@ fn read_events(stdout: ChildStdout, on_event: &mut dyn FnMut(Event)) -> Result<S
 }
 
 /// Waits for the child, but not forever. A helper running as root cannot be killed by the user,
-/// so after the deadline the attempt is made and the child is simply left behind.
-fn wait_bounded(child: &mut Child) -> Option<ExitStatus> {
-    let deadline = Instant::now() + EXIT_WAIT;
+/// so after the deadline the attempt is made and the child is left behind, handed to a thread
+/// that reaps it whenever it does exit, so a long-lived GUI does not collect zombies.
+fn wait_bounded(mut child: Child, wait: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + wait;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             _ => {
                 let _ = child.kill();
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 return None;
             }
         }
@@ -171,7 +192,7 @@ impl Installer for PkexecInstaller {
         finished.store(true, Ordering::SeqCst);
         lock(&stdin).take();
         let _ = watcher.join();
-        let status = wait_bounded(&mut child);
+        let status = wait_bounded(child, self.exit_wait);
         let stderr = join_bounded(stderr);
 
         let seen = outcome?;

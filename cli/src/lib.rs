@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
 use clap::{Parser, Subcommand};
 use store_core::{CancelToken, InstallError, Installer, Outcome, Package, Store};
 use store_protocol::{ChangeKind, Event, Operation, Request, Stage, is_valid_name};
@@ -64,9 +66,32 @@ pub fn default_db_path() -> Option<PathBuf> {
     default_db_path_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
 }
 
+/// Text from a repository or from the helper is untrusted: a control character (an escape
+/// sequence, a carriage return, a bell) must never reach the terminal as such.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// Like [`printable`] for multi-line messages: newlines and tabs are kept.
+fn printable_block(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn format_package(p: &Package) -> String {
     let installed = if p.is_installed() { " [installed]" } else { "" };
-    let detail = match (p.title.as_deref(), p.description.as_deref()) {
+    let title = p.title.as_deref().map(printable);
+    let description = p.description.as_deref().map(printable);
+    let detail = match (title, description) {
         (Some(title), Some(description)) => format!(" — {title}: {description}"),
         (Some(title), None) => format!(" — {title}"),
         (None, Some(description)) => format!(" — {description}"),
@@ -74,10 +99,10 @@ fn format_package(p: &Package) -> String {
     };
     format!(
         "{}/{} {} {}{}{}",
-        p.source,
-        p.repo.as_deref().unwrap_or("-"),
-        p.name,
-        p.version,
+        printable(&p.source.to_string()),
+        printable(p.repo.as_deref().unwrap_or("-")),
+        printable(&p.name),
+        printable(&p.version),
         installed,
         detail
     )
@@ -159,7 +184,9 @@ pub fn run<W: Write, E: Write>(
                         writeln!(out, "{}: {packages} packages", s.source)
                     }
                     Outcome::Unavailable => writeln!(out, "{}: unavailable", s.source),
-                    Outcome::Failed(message) => writeln!(out, "{}: failed: {message}", s.source),
+                    Outcome::Failed(message) => {
+                        writeln!(out, "{}: failed: {}", s.source, printable_block(message))
+                    }
                 };
             }
             let all_failed = !report.sources.is_empty()
@@ -212,7 +239,7 @@ fn describe(event: &Event) -> Option<String> {
         } => {
             let mut line = format!("[{}]", stage_name(*stage));
             if let Some(package) = package {
-                line.push_str(&format!(" {package}"));
+                line.push_str(&format!(" {}", printable(package)));
             }
             if let Some(percent) = percent {
                 line.push_str(&format!(" {percent}%"));
@@ -230,8 +257,10 @@ fn describe(event: &Event) -> Option<String> {
                         ChangeKind::Upgraded => "upgraded",
                     };
                     match &c.version {
-                        Some(version) => format!("{verb} {} {version}", c.package),
-                        None => format!("{verb} {}", c.package),
+                        Some(version) => {
+                            format!("{verb} {} {}", printable(&c.package), printable(version))
+                        }
+                        None => format!("{verb} {}", printable(&c.package)),
                     }
                 })
                 .collect();
@@ -239,6 +268,39 @@ fn describe(event: &Event) -> Option<String> {
         }
         Event::Error { .. } => None,
         Event::CancelIgnored => Some("too late to cancel; finishing the operation".to_string()),
+    }
+}
+
+/// Decides which progress events are worth a line: the first one for a step, then one per ten
+/// percent, and the final 100%. Without this a removal prints a line for every single percent.
+#[derive(Default)]
+struct ProgressFilter {
+    last_percent: HashMap<String, u8>,
+}
+
+impl ProgressFilter {
+    fn wanted(&mut self, event: &Event) -> bool {
+        let Event::Progress {
+            stage,
+            package,
+            percent: Some(percent),
+        } = event
+        else {
+            return true;
+        };
+        let key = format!(
+            "{}/{}",
+            stage_name(*stage),
+            package.as_deref().unwrap_or("")
+        );
+        let show = match self.last_percent.get(&key) {
+            None => true,
+            Some(last) => (*percent == 100 && *last != 100) || percent / 10 != last / 10,
+        };
+        if show {
+            self.last_percent.insert(key, *percent);
+        }
+        show
     }
 }
 
@@ -255,12 +317,17 @@ fn run_installer<W: Write, E: Write>(
     {
         let _ = writeln!(
             err,
-            "store: invalid package name {bad:?} (names use lowercase letters, digits and @ . _ + -)"
+            "store: invalid package name {:?} (names use lowercase letters, digits and @ . _ + -)",
+            printable(bad)
         );
         return 1;
     }
     let mut last_line = String::new();
+    let mut filter = ProgressFilter::default();
     let result = installer.run(request, &CancelToken::default(), &mut |event| {
+        if !filter.wanted(&event) {
+            return;
+        }
         if let Some(line) = describe(&event)
             && line != last_line
         {
@@ -277,13 +344,14 @@ fn run_installer<W: Write, E: Write>(
         Err(InstallError::NotAuthorized(text)) => {
             let _ = writeln!(
                 err,
-                "store: not authorized: {text}\n\
-                 If no dialog appeared, a polkit authentication agent may not be running in your session."
+                "store: not authorized: {}\n\
+                 If no dialog appeared, a polkit authentication agent may not be running in your session.",
+                printable_block(&text)
             );
             127
         }
         Err(e) => {
-            let _ = writeln!(err, "store: {e}");
+            let _ = writeln!(err, "store: {}", printable_block(&e.to_string()));
             1
         }
     }
@@ -302,7 +370,7 @@ fn print_packages<W: Write, E: Write>(
             0
         }
         Err(e) => {
-            let _ = writeln!(err, "store: {e}");
+            let _ = writeln!(err, "store: {}", printable_block(&e.to_string()));
             1
         }
     }
