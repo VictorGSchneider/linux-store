@@ -104,6 +104,16 @@ A revisão independente do código achou problemas que mudaram o desenho (cada u
 - **Decisões sob o lock:** nomes são resolvidos e a proteção é decidida **depois** de tomar o lock, porque a libalpm não recarrega seu cache de bancos.
 - **Testes não escrevem no journal do sistema.**
 
+Depois disso, os itens menores da revisão também foram tratados (cada um com teste):
+
+- **Escrita de eventos não bloqueia:** uma thread própria escreve a saída. Um cliente que parou de ler não segura mais uma transação que mantém o lock; eventos de progresso são descartados quando a fila enche, os demais nunca. O caminho de aborto escreve com limite de tempo e não espera essa thread.
+- **Auditoria com resultado:** além da linha do pedido, o journal recebe `result=ok changes=N` ou `result=error code=...`.
+- **`install` recusa atualização parcial:** com os bancos do pacman à frente do sistema (por exemplo depois de um `pacman -Sy` solto), o pedido falha com `upgrade_needed` e manda rodar o `upgrade` antes. Pacotes em `IgnorePkg` não contam.
+- **Pacote corrompido no cache é apagado**, para a próxima tentativa baixar de novo, e uma chave de assinatura não confiável gera uma mensagem explicando o que fazer.
+- **Saída da CLI:** nenhum caractere de controle vindo de repositórios ou do helper chega ao terminal, o progresso sai a cada 10% e os passos de verificação sem nome de pacote não aparecem mais.
+- **Cliente:** chama o `pkexec` pelo caminho absoluto e entrega um helper que não sai a uma thread que o recolhe, sem acumular zumbis.
+- **`dev-install.sh`:** recusa symlinks, lê cada arquivo uma vez com abertura sem seguir links para um diretório privado de root, confere a **cópia** (ELF e a ação do polkit) e instala essa cópia.
+
 ## Estrutura proposta
 
 - `protocol/` (`store-protocol`): tipos do pedido e dos eventos, com a validação.

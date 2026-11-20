@@ -141,7 +141,10 @@ The password is asked once and remembered for about five minutes by the process 
 `packaging/manual-check.sh` walks through installing and removing two tiny packages to check
 the real prompt. The helper accepts only package names (never paths or options), refuses to
 remove `pacman`, `base` and what `base` needs, and refreshes the package databases only as
-part of an upgrade, never alone.
+part of an upgrade, never alone. For the same reason `store install` refuses (with the
+`upgrade_needed` error) while the package databases are ahead of the installed system, for
+example after a plain `pacman -Sy`: run `store upgrade` first. Packages you put in `IgnorePkg`
+do not count as pending.
 
 ## Continuous integration
 
