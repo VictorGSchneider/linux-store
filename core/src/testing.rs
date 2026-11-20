@@ -65,6 +65,51 @@ impl Backend for FakeBackend {
     }
 }
 
+/// An `Installer` that replays canned events and records what it was asked. The result can be
+/// replayed once: `InstallError` holds an `io::Error` and is not `Clone`.
+pub struct FakeInstaller {
+    events: Vec<store_protocol::Event>,
+    result: std::sync::Mutex<Option<std::result::Result<(), crate::InstallError>>>,
+    requests: std::sync::Mutex<Vec<store_protocol::Request>>,
+}
+
+impl FakeInstaller {
+    pub fn new(
+        events: Vec<store_protocol::Event>,
+        result: std::result::Result<(), crate::InstallError>,
+    ) -> FakeInstaller {
+        FakeInstaller {
+            events,
+            result: std::sync::Mutex::new(Some(result)),
+            requests: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<store_protocol::Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl crate::Installer for FakeInstaller {
+    fn run(
+        &self,
+        request: &store_protocol::Request,
+        _cancel: &crate::CancelToken,
+        on_event: &mut dyn FnMut(store_protocol::Event),
+    ) -> std::result::Result<(), crate::InstallError> {
+        self.requests.lock().unwrap().push(request.clone());
+        for event in &self.events {
+            on_event(event.clone());
+        }
+        self.result.lock().unwrap().take().unwrap_or_else(|| {
+            Err(crate::InstallError::Failed {
+                exit_code: None,
+                stderr: "FakeInstaller was run twice".to_string(),
+            })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

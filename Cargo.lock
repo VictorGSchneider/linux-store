@@ -4531,6 +4531,7 @@ name = "store-core"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "store-protocol",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -4544,6 +4545,15 @@ dependencies = [
  "libc",
  "pacmanconf",
  "signal-hook",
+ "store-protocol",
+ "tempfile",
+]
+
+[[package]]
+name = "store-installer-pkexec"
+version = "0.1.0"
+dependencies = [
+ "store-core",
  "store-protocol",
  "tempfile",
 ]

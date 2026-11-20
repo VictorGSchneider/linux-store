@@ -1,0 +1,13 @@
+[package]
+name = "store-installer-pkexec"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Runs the linux-store privileged helper through pkexec and turns its events into results"
+
+[dependencies]
+store-core = { path = "../../core" }
+store-protocol = { path = "../../protocol" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

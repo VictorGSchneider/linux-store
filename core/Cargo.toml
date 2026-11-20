@@ -11,6 +11,7 @@ testing = []
 [dependencies]
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 thiserror = "2.0.21"
+store-protocol = { path = "../protocol" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
