@@ -87,8 +87,15 @@ pub(crate) fn attach(
             | AlpmEvent::LoadStart
             | AlpmEvent::FileConflictsStart
             | AlpmEvent::InterConflictsStart => emitter.emit(progress(Stage::Verify, None, None)),
-            // The first package operation is the point of no return for cancelling.
-            AlpmEvent::PackageOperationStart(_) => gate.commit_started(),
+            // Pre-transaction hooks run before the first package operation and already change
+            // the system (snapshots, kernel images), so they are the point of no return too.
+            AlpmEvent::HookStart(_) => {
+                gate.commit_started();
+                emitter.emit(progress(Stage::Hooks, None, None));
+            }
+            AlpmEvent::TransactionStart | AlpmEvent::PackageOperationStart(_) => {
+                gate.commit_started();
+            }
             _ => {}
         }
     });

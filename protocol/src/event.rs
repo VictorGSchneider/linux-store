@@ -18,6 +18,8 @@ pub enum Stage {
     Resolve,
     Download,
     Verify,
+    /// Pacman hooks (snapshots, cache refreshes...) run before and after the packages.
+    Hooks,
     Install,
     Upgrade,
     Remove,
@@ -126,6 +128,11 @@ mod tests {
             },
             Event::Progress {
                 stage: Stage::Resolve,
+                package: None,
+                percent: None,
+            },
+            Event::Progress {
+                stage: Stage::Hooks,
                 package: None,
                 percent: None,
             },

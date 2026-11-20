@@ -35,25 +35,27 @@ pub fn remove(
             .filter(|n| ALWAYS_PROTECTED.contains(n)),
     )?;
     let (mut alpm, questions) = txn::open(env, emitter, gate)?;
-    let missing: Vec<&str> = packages
-        .iter()
-        .map(String::as_str)
-        .filter(|name| alpm.localdb().pkg(*name).is_err())
-        .collect();
-    if !missing.is_empty() {
-        return Err(HelperError::new(
-            ErrorCode::NotFound,
-            format!("not installed: {}", missing.join(", ")),
-        ));
-    }
-    let protected = protected_packages(&alpm);
-    refuse(
-        packages
+    txn::run(&mut alpm, env.trans_flags(), &questions, gate, |alpm| {
+        // Decided only now that the lock is held: libalpm does not reload its database cache,
+        // so a view read earlier could be stale if another package manager just changed things.
+        let missing: Vec<&str> = packages
             .iter()
             .map(String::as_str)
-            .filter(|n| protected.contains(*n)),
-    )?;
-    txn::run(&mut alpm, env.trans_flags(), &questions, gate, |alpm| {
+            .filter(|name| alpm.localdb().pkg(*name).is_err())
+            .collect();
+        if !missing.is_empty() {
+            return Err(HelperError::new(
+                ErrorCode::NotFound,
+                format!("not installed: {}", missing.join(", ")),
+            ));
+        }
+        let protected = protected_packages(alpm);
+        refuse(
+            packages
+                .iter()
+                .map(String::as_str)
+                .filter(|n| protected.contains(*n)),
+        )?;
         for name in packages {
             let removed = {
                 let pkg = alpm.localdb().pkg(name.as_str()).expect("checked above");
@@ -193,6 +195,14 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::Protected);
+    }
+
+    #[test]
+    fn remove_checks_run_under_the_lock() {
+        let fx = system();
+        std::fs::write(fx.lock_path(), b"").unwrap();
+        let err = remove(&fx.env(), &names(&["ghost"]), &quiet(), &gate()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Locked, "{}", err.message);
     }
 
     #[test]

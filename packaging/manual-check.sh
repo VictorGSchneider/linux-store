@@ -32,15 +32,18 @@ pause() {
 }
 
 echo "This will run three real package operations. Watch for the password dialog."
+echo "Each 'store' command is a new process, and polkit remembers a password per process, so"
+echo "expect to be asked AGAIN in the later steps. The five-minute memory is for a long-lived"
+echo "program such as the GUI, which will call pkexec many times from one process."
 echo "(Optional: in another terminal during step 1, run:  ps -eo pid,ppid,user,args | grep -E 'pkexec|store-helper')"
 
 pause "STEP 1: store install tree        -> a password dialog SHOULD appear."
 "$store" install tree
 
-pause "STEP 2: store install cowsay      -> within about 5 minutes of step 1 it should NOT ask again."
+pause "STEP 2: store install cowsay      -> a new process, so a new password dialog is expected."
 "$store" install cowsay
 
-pause "STEP 3: store remove tree cowsay  -> a different action, but the same helper: note whether it asks."
+pause "STEP 3: store remove tree cowsay  -> a new process again; note whether it asks."
 "$store" remove tree cowsay
 
 echo
@@ -54,6 +57,6 @@ done
 echo
 echo "Please report back:"
 echo "  1. Did a graphical password dialog appear in step 1 (not in the terminal)?"
-echo "  2. Did step 2 ask for a password again?  Did step 3?"
+echo "  2. Which of the three steps asked for a password? (a new process is expected to ask each time)"
 echo "  3. (optional) In the ps output, was store-helper's parent pkexec, or your shell?"
 echo "  4. Any line printed by 'journalctl -t linux-store-helper --since -10min' (it shows what was logged)."

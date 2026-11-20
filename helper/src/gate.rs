@@ -96,13 +96,26 @@ impl CancelGate {
         if state.cancelled {
             return Err(cancelled());
         }
-        state.phase = Phase::Window;
+        // Never reopen a window that already closed (an upgrade closes it after its refresh).
+        if state.phase == Phase::Planning {
+            state.phase = Phase::Window;
+        }
         Ok(())
     }
 
-    /// Call when the first package operation starts: the point of no return.
+    /// The point of no return: from here a cancel is refused. Called when pre-transaction hooks
+    /// or the first package operation start, and by an upgrade once its refresh is done. A
+    /// cancel that was only flagged before this point is dropped: it can no longer be honoured.
     pub fn commit_started(&self) {
-        self.lock().phase = Phase::Committed;
+        let mut state = self.lock();
+        state.phase = Phase::Committed;
+        state.cancelled = false;
+    }
+
+    /// Call as soon as `trans_commit` returns, whatever the result: the lock is released after
+    /// this, and a later cancel must not remove a lock that is no longer ours.
+    pub fn commit_finished(&self) {
+        self.commit_started();
     }
 }
 
@@ -150,6 +163,40 @@ mod tests {
         assert_eq!(gate.request_cancel(), CancelOutcome::TooLate);
         assert_eq!(aborter.0.load(Ordering::SeqCst), 0);
         assert!(gate.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn the_window_never_reopens_once_the_commit_started() {
+        let (gate, aborter) = gate();
+        gate.open_window().unwrap();
+        gate.commit_started();
+        gate.open_window().unwrap();
+        assert_eq!(gate.request_cancel(), CancelOutcome::TooLate);
+        assert_eq!(aborter.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_finished_commit_is_too_late_to_cancel() {
+        let (gate, aborter) = gate();
+        gate.open_window().unwrap();
+        gate.commit_finished();
+        assert_eq!(gate.request_cancel(), CancelOutcome::TooLate);
+        assert_eq!(
+            aborter.0.load(Ordering::SeqCst),
+            0,
+            "a lock that is already released must not be removed"
+        );
+    }
+
+    #[test]
+    fn a_cancel_flagged_before_the_point_of_no_return_is_dropped_by_it() {
+        let (gate, _aborter) = gate();
+        assert_eq!(gate.request_cancel(), CancelOutcome::Cancelled);
+        gate.commit_started();
+        assert!(
+            gate.checkpoint().is_ok(),
+            "a cancel that can no longer be honoured must not fail the run"
+        );
     }
 
     #[test]

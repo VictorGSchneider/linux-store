@@ -81,8 +81,10 @@ fn transact(
     }
     let plan = plan(alpm);
     gate.open_window()?;
-    alpm.trans_commit()
-        .map_err(|e| map_error(e.error(), "the transaction failed"))?;
+    let committed = alpm.trans_commit();
+    // The lock is released right after this, whatever happened: a cancel from here on is too late.
+    gate.commit_finished();
+    committed.map_err(|e| map_error(e.error(), "the transaction failed"))?;
     Ok(plan)
 }
 

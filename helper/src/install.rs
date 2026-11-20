@@ -15,21 +15,23 @@ pub fn install(
 ) -> Result<Vec<Change>, HelperError> {
     gate.checkpoint()?;
     let (mut alpm, questions) = txn::open(env, emitter, gate)?;
-    let missing: Vec<&str> = packages
-        .iter()
-        .map(String::as_str)
-        .filter(|name| !alpm.syncdbs().iter().any(|db| db.pkg(*name).is_ok()))
-        .collect();
-    if !missing.is_empty() {
-        return Err(HelperError::new(
-            ErrorCode::NotFound,
-            format!(
-                "not found in the configured repositories: {}",
-                missing.join(", ")
-            ),
-        ));
-    }
     txn::run(&mut alpm, env.trans_flags(), &questions, gate, |alpm| {
+        // Resolved only now that the lock is held: libalpm does not reload its database cache,
+        // so a name looked up earlier could refer to a database someone else just replaced.
+        let missing: Vec<&str> = packages
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !alpm.syncdbs().iter().any(|db| db.pkg(*name).is_ok()))
+            .collect();
+        if !missing.is_empty() {
+            return Err(HelperError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "not found in the configured repositories: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
         for name in packages {
             let added = {
                 let pkg = alpm
@@ -196,6 +198,105 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::Cancelled);
         assert!(fx.installed().is_empty());
+    }
+
+    #[test]
+    fn install_checks_run_under_the_lock() {
+        // libalpm does not reload its database cache, so names must be resolved only after the
+        // lock is taken: with a stale lock the answer is `locked`, not `not_found`.
+        let fx = world();
+        std::fs::write(fx.lock_path(), b"").unwrap();
+        let (emitter, _) = collecting();
+        let err = install(&fx.env(), &names(&["ghost"]), &emitter, &gate()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Locked, "{}", err.message);
+    }
+
+    #[test]
+    fn cancel_during_the_download_hits_the_window() {
+        let fx = world();
+        let aborter = Arc::new(RecordingAborter::default());
+        let gate = CancelGate::new(aborter.clone());
+        let (emitter, answer) = crate::fixture::cancelling_at(&gate, Stage::Download);
+        install(&fx.env(), &names(&["app"]), &emitter, &gate).unwrap();
+        assert_eq!(answer.get(), Some(crate::CancelOutcome::Cancelled));
+        assert_eq!(
+            aborter.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the real aborter would have run"
+        );
+    }
+
+    #[test]
+    fn cancel_after_the_first_package_operation_is_too_late() {
+        let fx = world();
+        let aborter = Arc::new(RecordingAborter::default());
+        let gate = CancelGate::new(aborter.clone());
+        let (emitter, answer) = crate::fixture::cancelling_at(&gate, Stage::Install);
+        let changes = install(&fx.env(), &names(&["app"]), &emitter, &gate).unwrap();
+        assert_eq!(answer.get(), Some(crate::CancelOutcome::TooLate));
+        assert_eq!(aborter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(changes.len(), 2, "the operation must complete");
+    }
+
+    #[test]
+    fn a_pre_transaction_hook_closes_the_cancel_window() {
+        // Hooks run before the first package operation and change the system (snapshots, kernel
+        // image removal), so a cancel that arrives while they run must not abort.
+        let fx = world();
+        fx.add_hook(
+            "10-test",
+            "[Trigger]\nOperation = Install\nType = Package\nTarget = *\n\n[Action]\nDescription = test\nWhen = PreTransaction\nExec = /usr/bin/true\n",
+        );
+        let aborter = Arc::new(RecordingAborter::default());
+        let gate = CancelGate::new(aborter.clone());
+        let (emitter, answer) = crate::fixture::cancelling_at(&gate, Stage::Hooks);
+        install(&fx.env(), &names(&["app"]), &emitter, &gate).unwrap();
+        assert_eq!(
+            answer.get(),
+            Some(crate::CancelOutcome::TooLate),
+            "no hook event was reported"
+        );
+        assert_eq!(aborter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_failed_commit_closes_the_window() {
+        // A file conflict makes the commit fail and the lock is released; a cancel arriving after
+        // that must not delete a lock that may now belong to someone else.
+        let fx = Fixture::new();
+        fx.publish("hello", "1.0-1", &[]);
+        fx.sync();
+        fx.create_root_file("usr/bin/hello");
+        let aborter = Arc::new(RecordingAborter::default());
+        let gate = CancelGate::new(aborter.clone());
+        let (emitter, _) = collecting();
+        let err = install(&fx.env(), &names(&["hello"]), &emitter, &gate).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict, "{}", err.message);
+        assert_eq!(gate.request_cancel(), crate::CancelOutcome::TooLate);
+        assert_eq!(aborter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn downloaded_packages_are_not_writable_by_others_whatever_the_callers_umask() {
+        // pkexec passes the caller's umask on; libalpm creates cached packages as ~umask & 0666,
+        // so a umask of 0 would leave root-owned files anyone can rewrite between the signature
+        // check and the extraction.
+        let fx = world();
+        // SAFETY: umask only changes the process-wide creation mask, restored below.
+        let previous = unsafe { libc::umask(0) };
+        crate::harden::set_umask(); // the first thing main does
+        let result = install(&fx.env(), &names(&["app"]), &collecting().0, &gate());
+        unsafe { libc::umask(previous) };
+        result.unwrap();
+        let modes = fx.cache_file_modes();
+        assert!(!modes.is_empty(), "no package files in the cache");
+        for (file, mode) in modes {
+            assert_eq!(
+                mode & 0o022,
+                0,
+                "{file} is group or world writable ({mode:o})"
+            );
+        }
     }
 
     #[test]

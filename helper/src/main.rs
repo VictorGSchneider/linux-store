@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
-use store_helper::{CancelGate, Environment, ProcessAborter, ensure_root, serve};
+use store_helper::{CancelGate, Environment, ProcessAborter, ensure_root, harden_process, serve};
 use store_protocol::{EXIT_FAILED, ErrorCode, Event};
 
 /// Setup failed before a request was read: say so as an event, like every other answer.
@@ -21,6 +21,9 @@ fn refuse(message: &str) -> i32 {
 }
 
 fn run() -> i32 {
+    // First: pkexec hands over the caller's umask, terminal and resource limits as they are.
+    harden_process();
+
     // SAFETY: this is the first thing the process does, before any other thread exists.
     // A fixed PATH keeps `pacman-conf` (run by the configuration reader) out of reach of
     // whatever the caller's environment says.

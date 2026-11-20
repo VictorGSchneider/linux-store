@@ -92,6 +92,18 @@ O `pkexec` associa a ação ao **caminho do binário**, então a v1 tem **uma ú
 3. **Lista de proteção na remoção**: `pacman`, o metapacote `base` e o helper.
 4. **A interface `Installer`** tem `install`, `remove` e `upgrade`, cada uma devolvendo um fluxo de eventos; o cliente de `pkexec` é a única implementação por enquanto.
 
+## Alterações depois da revisão de segurança
+
+A revisão independente do código achou problemas que mudaram o desenho (cada um tem teste):
+
+- **Umask:** o `pkexec` repassa a umask de quem chamou. Com umask 0 a libalpm deixava os pacotes baixados com modo `0666` (donos: root), que qualquer processo do usuário podia reescrever entre a checagem de assinatura e a extração. O helper agora fixa `umask 022` antes de tudo.
+- **Higiene do processo:** o helper sai da sessão do terminal (`setsid`), ignora `SIGQUIT`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU` e `SIGXFSZ`, e restaura os limites de recursos (tamanho de arquivo, CPU, memória, descritores). O terminal de quem chamou não pode mais parar nem matar a transação no meio.
+- **Hooks são ponto sem volta:** os hooks de pré-transação do pacman (snapshots, remoção de imagens do kernel) rodam antes da primeira operação de pacote e já alteram o sistema. O ponto sem volta do cancelamento agora é o início dos hooks (evento `hooks` no protocolo), não a primeira operação de pacote.
+- **Janela fecha quando o commit termina:** depois que `trans_commit` retorna (com sucesso ou erro) um cancelamento é tarde demais, para nunca remover um `db.lck` que não é mais nosso.
+- **`upgrade` não cancela depois do refresh:** atualizar os bancos sem atualizar o sistema é o estado de atualização parcial que o design proíbe. Depois do refresh o `upgrade` vai até o fim.
+- **Decisões sob o lock:** nomes são resolvidos e a proteção é decidida **depois** de tomar o lock, porque a libalpm não recarrega seu cache de bancos.
+- **Testes não escrevem no journal do sistema.**
+
 ## Estrutura proposta
 
 - `protocol/` (`store-protocol`): tipos do pedido e dos eventos, com a validação.

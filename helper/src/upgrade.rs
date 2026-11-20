@@ -15,7 +15,9 @@ pub fn upgrade(
     alpm.syncdbs_mut()
         .update(false)
         .map_err(|e| txn::map_error(e, "cannot refresh the package databases"))?;
-    gate.checkpoint()?;
+    // The refreshed databases are only safe together with the upgrade (a refresh alone is the
+    // partial-upgrade state), so from here on the operation runs to the end: no cancel.
+    gate.commit_started();
     txn::run(&mut alpm, env.trans_flags(), &questions, gate, |alpm| {
         alpm.sync_sysupgrade(false)
             .map_err(|e| txn::map_error(e, "cannot plan the system upgrade"))
@@ -76,6 +78,24 @@ mod tests {
         assert_eq!(upgrade(&fx.env(), &quiet(), &gate()).unwrap(), vec![]);
         assert_eq!(fx.installed(), ["hello-1.0-1"]);
         assert!(!fx.lock_exists());
+    }
+
+    #[test]
+    fn upgrade_cannot_be_cancelled_once_the_databases_are_refreshed() {
+        // A refresh without the upgrade is the partial-upgrade state the design forbids, so after
+        // the refresh the upgrade runs to the end.
+        let fx = Fixture::new();
+        fx.publish("hello", "1.0-1", &[]);
+        fx.sync();
+        install(&fx.env(), &names(&["hello"]), &quiet(), &gate()).unwrap();
+        fx.publish("hello", "2.0-1", &[]);
+        let gate = gate();
+        let (emitter, answer) =
+            crate::fixture::cancelling_at(&gate, store_protocol::Stage::Resolve);
+        let changes = upgrade(&fx.env(), &emitter, &gate).unwrap();
+        assert_eq!(answer.get(), Some(crate::CancelOutcome::TooLate));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(fx.installed(), ["hello-2.0-1"]);
     }
 
     #[test]

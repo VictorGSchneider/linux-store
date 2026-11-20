@@ -20,7 +20,12 @@ pub fn audit_line(caller_uid: Option<&str>, request: &Request) -> String {
     }
 }
 
+/// Tests must not write to the real system journal.
+#[cfg(test)]
+pub fn audit(_line: &str) {}
+
 /// Writes `line` to the system log (the journal picks it up) as `linux-store-helper`.
+#[cfg(not(test))]
 pub fn audit(line: &str) {
     let Ok(text) = std::ffi::CString::new(line) else {
         return; // a validated line never contains NUL

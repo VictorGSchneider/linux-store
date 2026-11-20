@@ -193,6 +193,7 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::Resolve => "resolve",
         Stage::Download => "download",
         Stage::Verify => "verify",
+        Stage::Hooks => "hooks",
         Stage::Install => "install",
         Stage::Upgrade => "upgrade",
         Stage::Remove => "remove",

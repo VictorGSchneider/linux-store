@@ -160,6 +160,33 @@ impl Fixture {
         found
     }
 
+    /// Drops a pacman hook into the hooks directory.
+    pub(crate) fn add_hook(&self, name: &str, content: &str) {
+        fs::write(self.path("hooks").join(format!("{name}.hook")), content).unwrap();
+    }
+
+    /// A file in the root that no package owns, so installing a package that ships it conflicts.
+    pub(crate) fn create_root_file(&self, relative_to_root: &str) {
+        let target = self.path("root").join(relative_to_root);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, b"not owned by any package").unwrap();
+    }
+
+    /// Permission bits of every package file libalpm downloaded into the cache.
+    pub(crate) fn cache_file_modes(&self) -> Vec<(String, u32)> {
+        fs::read_dir(self.path("cache"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".pkg.tar"))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().unwrap().permissions().mode() & 0o777,
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn lock_path(&self) -> PathBuf {
         self.path("db/db.lck")
     }
@@ -183,4 +210,26 @@ impl Aborter for RecordingAborter {
     fn abort(&self) {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// An emitter that asks the gate to cancel at the first progress event of `when`, from inside the
+/// operation, and remembers the answer. This exercises the real moments libalpm reports.
+pub(crate) fn cancelling_at(
+    gate: &crate::CancelGate,
+    when: store_protocol::Stage,
+) -> (
+    crate::Emitter,
+    std::rc::Rc<std::cell::Cell<Option<crate::CancelOutcome>>>,
+) {
+    let answer: std::rc::Rc<std::cell::Cell<Option<crate::CancelOutcome>>> = Default::default();
+    let (gate, slot) = (gate.clone(), answer.clone());
+    let emitter = crate::Emitter::new(move |event| {
+        if let store_protocol::Event::Progress { stage, .. } = event
+            && stage == when
+            && slot.get().is_none()
+        {
+            slot.set(Some(gate.request_cancel()));
+        }
+    });
+    (emitter, answer)
 }
