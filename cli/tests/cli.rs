@@ -151,3 +151,31 @@ fn search_shows_title_before_description() {
     assert_eq!(code, 0);
     assert!(out.contains("— Alpha App: first"), "{out}");
 }
+
+#[test]
+fn refresh_reports_every_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let argv: Vec<String> = ["store", "--db", &db(&dir), "refresh"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(
+        &argv,
+        |path| {
+            Ok(Store::new(
+                Index::open(path)?,
+                vec![
+                    Box::new(FakeBackend::new("one", vec![pkg("one", "a", "x")])),
+                    Box::new(FakeBackend::new("two", vec![]).unavailable()),
+                ],
+            ))
+        },
+        &mut out,
+        &mut err,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("one: 1 packages"), "{out}");
+    assert!(out.contains("two: unavailable"), "{out}");
+}

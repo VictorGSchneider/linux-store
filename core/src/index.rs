@@ -21,6 +21,7 @@ const SCHEMA: &str = "
         installed_size INTEGER NOT NULL,
         UNIQUE (source, name)
     );
+    CREATE INDEX IF NOT EXISTS packages_name_lower ON packages (lower(name));
     CREATE VIRTUAL TABLE IF NOT EXISTS packages_fts
         USING fts5(name, title, description, tokenize = 'unicode61');
 ";
@@ -148,6 +149,16 @@ impl Index {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
+        // One or two letters match tens of thousands of rows, and ranking them all by bm25 is
+        // slow (about 90 ms for `a` over the AUR). Such a query is a name prefix, so answer it
+        // from the name index instead. Non-ASCII terms keep the full-text path because SQLite's
+        // `lower()` only folds ASCII.
+        if let [term] = terms.as_slice()
+            && term.len() <= 2
+            && term.is_ascii()
+        {
+            return self.search_name_prefix(&term.to_ascii_lowercase(), limit);
+        }
         let last = terms.len() - 1;
         let fts_query = terms
             .iter()
@@ -182,6 +193,24 @@ impl Index {
                 query.trim(),
                 i64::try_from(limit).unwrap_or(i64::MAX)
             ],
+            row_to_package,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Packages whose lowercased name starts with `prefix` (ASCII, lowercase, non-empty):
+    /// the exact name first, then shorter names, then by name.
+    fn search_name_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Package>> {
+        let mut upper = prefix.to_string();
+        let last = upper.pop().expect("prefix is not empty");
+        upper.push(char::from(last as u8 + 1));
+        let sql = format!(
+            "SELECT {COLUMNS} FROM packages WHERE lower(name) >= ?1 AND lower(name) < ?2 \
+             ORDER BY lower(name) = ?1 DESC, length(name), name, source LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![prefix, upper, i64::try_from(limit).unwrap_or(i64::MAX)],
             row_to_package,
         )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -557,5 +586,67 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn one_letter_query_matches_name_prefixes_only() {
+        let idx = indexed(&[
+            pkg("a", "banana", "a fruit, as in apple"),
+            pkg("a", "apple", "fruit"),
+            pkg("a", "alpha", "first letter"),
+            pkg("a", "Avocado", "fruit"),
+        ]);
+        // Names starting with "a" (any case), shorter first, then by name; not the description hit.
+        assert_eq!(
+            names(idx.search("a", 10).unwrap()),
+            ["alpha", "apple", "Avocado"]
+        );
+    }
+
+    #[test]
+    fn two_letter_query_ranks_exact_then_shorter_names() {
+        let idx = indexed(&[
+            pkg("a", "gopher", "x"),
+            pkg("a", "golang", "x"),
+            pkg("a", "go", "x"),
+            pkg("a", "ago", "x"),
+        ]);
+        assert_eq!(
+            names(idx.search("GO", 10).unwrap()),
+            ["go", "golang", "gopher"]
+        );
+    }
+
+    #[test]
+    fn short_query_respects_limit() {
+        let many: Vec<Package> = (0..20)
+            .map(|i| pkg("a", &format!("tool-{i}"), "x"))
+            .collect();
+        let idx = indexed(&many);
+        assert_eq!(idx.search("t", 5).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn non_ascii_short_query_still_works() {
+        let idx = indexed(&[pkg("a", "éclair", "pastry")]);
+        assert_eq!(names(idx.search("é", 10).unwrap()), ["éclair"]);
+    }
+
+    #[test]
+    fn short_query_uses_the_name_index() {
+        let idx = Index::open_in_memory().unwrap();
+        let plan: String = idx
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT name FROM packages \
+                 WHERE lower(name) >= 'a' AND lower(name) < 'b'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("packages_name_lower"), "{plan}");
     }
 }

@@ -4509,6 +4509,8 @@ name = "store-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "store-backend-aur",
+ "store-backend-flatpak",
  "store-backend-pacman",
  "store-core",
  "tempfile",
