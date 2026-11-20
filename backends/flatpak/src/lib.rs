@@ -1,6 +1,7 @@
 //! Read-only Flatpak backend. It reads the AppStream catalog that Flatpak already keeps on
 //! disk for every remote, streaming the XML so the 48 MiB Flathub file is never held whole.
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -18,12 +19,14 @@ pub struct FlatpakBackend {
 }
 
 impl FlatpakBackend {
-    /// The system installation (`/var/lib/flatpak`) and the user one (`~/.local/share/flatpak`).
+    /// The system installation (`/var/lib/flatpak`) and the user one
+    /// (`$XDG_DATA_HOME/flatpak`, else `~/.local/share/flatpak`).
     pub fn from_system() -> FlatpakBackend {
         let mut installations = vec![PathBuf::from("/var/lib/flatpak")];
-        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-            installations.push(PathBuf::from(home).join(".local/share/flatpak"));
-        }
+        installations.extend(user_installation_dir(
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("HOME"),
+        ));
         FlatpakBackend {
             installations,
             arch: flatpak_arch(),
@@ -71,17 +74,50 @@ impl FlatpakBackend {
         found
     }
 
-    fn is_installed(&self, id: &str, branch: &str) -> bool {
-        self.installations.iter().any(|installation| {
-            installation
-                .join("app")
-                .join(id)
-                .join(&self.arch)
-                .join(branch)
-                .join("active")
-                .symlink_metadata()
-                .is_ok()
-        })
+    /// Installed apps across every installation: id -> branch (`stable` preferred). An app is
+    /// installed when `app/<id>/<arch>/<branch>/active` exists, whichever branch that is.
+    fn installed_apps(&self) -> HashMap<String, String> {
+        let mut installed = HashMap::new();
+        for installation in &self.installations {
+            let Ok(ids) = std::fs::read_dir(installation.join("app")) else {
+                continue;
+            };
+            for id_entry in ids.flatten() {
+                let Ok(id) = id_entry.file_name().into_string() else {
+                    continue;
+                };
+                let Ok(branches) = std::fs::read_dir(id_entry.path().join(&self.arch)) else {
+                    continue;
+                };
+                let mut branches: Vec<String> = branches
+                    .flatten()
+                    .filter(|b| b.path().join("active").symlink_metadata().is_ok())
+                    .filter_map(|b| b.file_name().into_string().ok())
+                    .collect();
+                branches.sort();
+                let chosen = branches
+                    .iter()
+                    .find(|b| b.as_str() == "stable")
+                    .or(branches.first());
+                if let Some(branch) = chosen {
+                    installed.entry(id).or_insert_with(|| branch.clone());
+                }
+            }
+        }
+        installed
+    }
+}
+
+/// Where Flatpak keeps the per-user installation.
+pub fn user_installation_dir(
+    xdg_data_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    match xdg_data_home.filter(|v| !v.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join("flatpak")),
+        None => home
+            .filter(|v| !v.is_empty())
+            .map(|home| PathBuf::from(home).join(".local/share/flatpak")),
     }
 }
 
@@ -123,16 +159,32 @@ impl Backend for FlatpakBackend {
             };
             parse_catalog(file, &catalog.remote, &mut collector).map_err(backend_error)?;
         }
-        let mut packages = Vec::with_capacity(collector.entries.len());
+        let mut installed = self.installed_apps();
+        let mut packages = Vec::with_capacity(collector.entries.len() + installed.len());
         for entry in collector.entries {
             let mut package = entry.package;
-            if let Some(branch) = &entry.branch
-                && self.is_installed(&package.name, branch)
-            {
+            if installed.remove(&package.name).is_some() {
                 // The deployed version is unknown until update detection exists.
                 package.installed_version = Some(package.version.clone());
             }
             packages.push(package);
+        }
+        // Installed apps no catalog lists (end-of-life, or from a remote without AppStream).
+        let mut leftover: Vec<(String, String)> = installed.into_iter().collect();
+        leftover.sort();
+        for (id, branch) in leftover {
+            packages.push(Package {
+                source: SourceId::new(SOURCE),
+                name: id,
+                version: branch.clone(),
+                installed_version: Some(branch),
+                title: None,
+                description: None,
+                repo: None,
+                url: None,
+                download_size: 0,
+                installed_size: 0,
+            });
         }
         Ok(packages)
     }
@@ -140,7 +192,6 @@ impl Backend for FlatpakBackend {
 
 struct Entry {
     package: Package,
-    branch: Option<String>,
     stable: bool,
 }
 
@@ -216,6 +267,7 @@ fn parse_catalog(
     let mut component: Option<Component> = None;
     let mut field: Option<Field> = None;
     let mut text = String::new();
+    let mut saw_root = false;
 
     loop {
         let event = xml
@@ -226,8 +278,11 @@ fn parse_catalog(
                 let is_empty = matches!(event, Event::Empty(_));
                 let name = e.name().as_ref().to_vec();
                 let depth = path_stack.len() + 1;
-                if depth == 1 && name != b"components" {
-                    return Err("not an AppStream catalog".to_string());
+                if depth == 1 {
+                    if name != b"components" {
+                        return Err("not an AppStream catalog".to_string());
+                    }
+                    saw_root = true;
                 }
                 if depth == 2 && name == b"component" {
                     component = Some(Component {
@@ -308,6 +363,10 @@ fn parse_catalog(
                 path_stack.pop();
             }
             Event::Eof => {
+                // An empty or non-XML file must not look like a catalog with no apps.
+                if !saw_root {
+                    return Err("not an AppStream catalog (no <components> element)".to_string());
+                }
                 if !path_stack.is_empty() {
                     return Err("unexpected end of file".to_string());
                 }
@@ -321,7 +380,13 @@ fn parse_catalog(
 
 /// Builds a package from a finished `<component>`, or `None` if it is not an application.
 fn finish(c: Component, remote: &str) -> Option<Entry> {
-    if (c.kind != "desktop-application" && c.kind != "console-application") || c.id.is_empty() {
+    // `desktop` is the legacy AppStream spelling of `desktop-application`; Flathub still
+    // ships org.mozilla.firefox and 18 other apps with it.
+    let is_app = matches!(
+        c.kind.as_str(),
+        "desktop-application" | "console-application" | "desktop"
+    );
+    if !is_app || c.id.is_empty() {
         return None;
     }
     // `app/<id>/<arch>/<branch>`
@@ -356,7 +421,6 @@ fn finish(c: Component, remote: &str) -> Option<Entry> {
             download_size: 0,
             installed_size: 0,
         },
-        branch,
         stable,
     })
 }

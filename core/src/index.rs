@@ -139,8 +139,9 @@ impl Index {
     ///
     /// The query is split into alphanumeric terms, each passed to FTS5 as a quoted literal (so
     /// user input can never be interpreted as FTS syntax); the last term matches as a prefix and
-    /// all terms must match. Ordering: exact name, then name starting with the query, then
-    /// bm25 (name and title weighted 10x over description), then shorter name, then name.
+    /// all terms must match. Ordering: exact name or title, then name starting with the query, then
+    /// bm25 (name and title weighted 10x over description), then shorter name, then name. An exact
+    /// title counts as an exact name.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Package>> {
         let terms: Vec<&str> = query
             .split(|c: char| !c.is_alphanumeric())
@@ -181,7 +182,7 @@ impl Index {
             "SELECT {columns} FROM packages_fts \
              JOIN packages p ON p.id = packages_fts.rowid \
              WHERE packages_fts MATCH ?1 \
-             ORDER BY lower(p.name) = lower(?2) DESC, \
+             ORDER BY (lower(p.name) = lower(?2) OR lower(coalesce(p.title, '')) = lower(?2)) DESC, \
                       substr(lower(p.name), 1, length(?2)) = lower(?2) DESC, \
                       bm25(packages_fts, 10.0, 10.0, 1.0), length(p.name), p.name \
              LIMIT ?3"
@@ -648,5 +649,23 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(plan.contains("packages_name_lower"), "{plan}");
+    }
+
+    #[test]
+    fn exact_title_ranks_with_exact_name() {
+        // Many `firefox-*` names start with the query; the app whose title is exactly
+        // "Firefox" must still come first, as the plan's headline example requires.
+        let mut packages: Vec<Package> = (0..30)
+            .map(|i| pkg("a", &format!("firefox-extra-{i}"), "an add-on"))
+            .collect();
+        packages.push(Package {
+            title: Some("Firefox".into()),
+            ..pkg("a", "org.mozilla.firefox", "web browser")
+        });
+        let idx = indexed(&packages);
+        assert_eq!(
+            idx.search("firefox", 10).unwrap()[0].name,
+            "org.mozilla.firefox"
+        );
     }
 }

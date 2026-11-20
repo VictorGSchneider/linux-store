@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use flate2::{Compression, write::GzEncoder};
-use store_backend_flatpak::FlatpakBackend;
+use store_backend_flatpak::{FlatpakBackend, user_installation_dir};
 use store_core::{Backend, Error, Package, SourceId};
 
 const ARCH: &str = "x86_64";
@@ -260,4 +260,117 @@ fn no_catalog_means_unavailable() {
 fn real_system_smoke() {
     let packages = FlatpakBackend::from_system().packages().unwrap();
     assert!(packages.len() > 1000, "only {} apps", packages.len());
+    // Flathub ships Firefox with the legacy type="desktop"; it must not be dropped.
+    assert!(
+        packages.iter().any(|p| p.name == "org.mozilla.firefox"),
+        "org.mozilla.firefox missing"
+    );
+}
+
+#[test]
+fn legacy_desktop_type_is_an_application() {
+    // Real Flathub ships org.mozilla.firefox with the legacy type="desktop".
+    let firefox = app("org.mozilla.firefox", "Firefox", "", "stable")
+        .replace("desktop-application", "desktop");
+    let (_dir, packages) = load(&catalog(&[firefox]));
+    assert_eq!(
+        find(&packages, "org.mozilla.firefox").title.as_deref(),
+        Some("Firefox")
+    );
+}
+
+#[test]
+fn empty_or_non_xml_catalog_is_an_error() {
+    for (label, content) in [
+        ("zero bytes", ""),
+        ("xml declaration only", "<?xml version=\"1.0\"?>"),
+        ("plain text", "hello world"),
+        ("wrong root", "<other/>"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write_catalog(dir.path(), "flathub", content);
+        let message = backend_error(backend(&[dir.path()]).packages());
+        assert!(message.contains("flathub"), "{label}: {message}");
+    }
+}
+
+#[test]
+fn empty_catalog_does_not_hide_a_working_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(
+        dir.path(),
+        "good",
+        &catalog(&[app("org.example.App", "App", "", "stable")]),
+    );
+    write_catalog(dir.path(), "truncated-to-nothing", "");
+    // The whole refresh fails, so the previously indexed Flatpak data is kept.
+    backend_error(backend(&[dir.path()]).packages());
+}
+
+#[test]
+fn gzip_of_nothing_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog_dir = dir
+        .path()
+        .join("appstream/flathub")
+        .join(ARCH)
+        .join("active");
+    fs::create_dir_all(&catalog_dir).unwrap();
+    let enc = GzEncoder::new(Vec::new(), Compression::default());
+    fs::write(catalog_dir.join("appstream.xml.gz"), enc.finish().unwrap()).unwrap();
+    backend_error(backend(&[dir.path()]).packages());
+}
+
+#[test]
+fn installed_on_another_branch_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(
+        dir.path(),
+        "flathub",
+        &catalog(&[app("org.example.App", "App", two_releases(), "stable")]),
+    );
+    install(dir.path(), "org.example.App", "beta");
+    let packages = backend(&[dir.path()]).packages().unwrap();
+    assert!(
+        find(&packages, "org.example.App")
+            .installed_version
+            .is_some()
+    );
+}
+
+#[test]
+fn installed_apps_missing_from_the_catalog_are_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(
+        dir.path(),
+        "flathub",
+        &catalog(&[app("org.example.App", "App", "", "stable")]),
+    );
+    install(dir.path(), "org.gone.Legacy", "stable");
+    let packages = backend(&[dir.path()]).packages().unwrap();
+    let gone = find(&packages, "org.gone.Legacy");
+    assert_eq!(gone.installed_version.as_deref(), Some("stable"));
+    assert_eq!(gone.version, "stable");
+    assert_eq!((gone.title.as_deref(), gone.repo.as_deref()), (None, None));
+}
+
+#[test]
+fn user_installation_honours_xdg_data_home() {
+    use std::ffi::OsString;
+    let path = |x: Option<&str>, h: Option<&str>| {
+        user_installation_dir(x.map(OsString::from), h.map(OsString::from))
+    };
+    assert_eq!(
+        path(Some("/data"), Some("/home/u")),
+        Some(PathBuf::from("/data/flatpak"))
+    );
+    assert_eq!(
+        path(None, Some("/home/u")),
+        Some(PathBuf::from("/home/u/.local/share/flatpak"))
+    );
+    assert_eq!(
+        path(Some(""), Some("/home/u")),
+        Some(PathBuf::from("/home/u/.local/share/flatpak"))
+    );
+    assert_eq!(path(None, None), None);
 }
