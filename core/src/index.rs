@@ -4,7 +4,7 @@ use rusqlite::{Connection, Row, params};
 
 use crate::{Error, Package, Result, SourceId};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS packages (
@@ -13,6 +13,7 @@ const SCHEMA: &str = "
         name TEXT NOT NULL,
         version TEXT NOT NULL,
         installed_version TEXT,
+        title TEXT,
         description TEXT,
         repo TEXT,
         url TEXT,
@@ -21,11 +22,11 @@ const SCHEMA: &str = "
         UNIQUE (source, name)
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS packages_fts
-        USING fts5(name, description, tokenize = 'unicode61');
+        USING fts5(name, title, description, tokenize = 'unicode61');
 ";
 
 /// Columns of `packages`, in the order `row_to_package` reads them.
-const COLUMNS: &str = "source, name, version, installed_version, description, repo, url, \
+const COLUMNS: &str = "source, name, version, installed_version, title, description, repo, url, \
                        download_size, installed_size";
 
 /// Local SQLite index of every package known to every source.
@@ -45,8 +46,9 @@ impl Index {
         Index::init(Connection::open_in_memory()?)
     }
 
-    /// Creates the schema only for a brand-new database. Opening an existing index must not
-    /// write, otherwise a reader (a search) would wait for any concurrent refresh.
+    /// Creates the schema for a brand-new database and rebuilds an older one (the index is only
+    /// a cache). Opening an up-to-date index must not write, otherwise a reader (a search)
+    /// would wait for any concurrent refresh.
     fn init(conn: Connection) -> Result<Index> {
         let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if found > SCHEMA_VERSION {
@@ -55,7 +57,11 @@ impl Index {
                 supported: SCHEMA_VERSION,
             });
         }
-        if found == 0 {
+        if found != SCHEMA_VERSION {
+            // Older schema: drop it; the next refresh refills the cache.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS packages_fts; DROP TABLE IF EXISTS packages;",
+            )?;
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -78,11 +84,12 @@ impl Index {
         tx.execute("DELETE FROM packages WHERE source = ?1", [source.as_str()])?;
         {
             let mut insert = tx.prepare(
-                "INSERT INTO packages (source, name, version, installed_version, description, \
-                 repo, url, download_size, installed_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO packages (source, name, version, installed_version, title, description, \
+                 repo, url, download_size, installed_size) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let mut insert_fts = tx.prepare(
-                "INSERT INTO packages_fts (rowid, name, description) VALUES (?1, ?2, ?3)",
+                "INSERT INTO packages_fts (rowid, name, title, description) VALUES (?1, ?2, ?3, ?4)",
             )?;
             for p in packages {
                 insert.execute(params![
@@ -90,6 +97,7 @@ impl Index {
                     p.name,
                     p.version,
                     p.installed_version,
+                    p.title,
                     p.description,
                     p.repo,
                     p.url,
@@ -97,7 +105,12 @@ impl Index {
                     to_sql_size(p.installed_size),
                 ])?;
                 let id = tx.last_insert_rowid();
-                insert_fts.execute(params![id, p.name, p.description.as_deref().unwrap_or("")])?;
+                insert_fts.execute(params![
+                    id,
+                    p.name,
+                    p.title.as_deref().unwrap_or(""),
+                    p.description.as_deref().unwrap_or("")
+                ])?;
             }
         }
         tx.commit()?;
@@ -126,7 +139,7 @@ impl Index {
     /// The query is split into alphanumeric terms, each passed to FTS5 as a quoted literal (so
     /// user input can never be interpreted as FTS syntax); the last term matches as a prefix and
     /// all terms must match. Ordering: exact name, then name starting with the query, then
-    /// bm25 (name weighted 10x over description), then shorter name, then name.
+    /// bm25 (name and title weighted 10x over description), then shorter name, then name.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Package>> {
         let terms: Vec<&str> = query
             .split(|c: char| !c.is_alphanumeric())
@@ -159,7 +172,7 @@ impl Index {
              WHERE packages_fts MATCH ?1 \
              ORDER BY lower(p.name) = lower(?2) DESC, \
                       substr(lower(p.name), 1, length(?2)) = lower(?2) DESC, \
-                      bm25(packages_fts, 10.0, 1.0), length(p.name), p.name \
+                      bm25(packages_fts, 10.0, 10.0, 1.0), length(p.name), p.name \
              LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -192,11 +205,12 @@ fn row_to_package(row: &Row<'_>) -> rusqlite::Result<Package> {
         name: row.get(1)?,
         version: row.get(2)?,
         installed_version: row.get(3)?,
-        description: row.get(4)?,
-        repo: row.get(5)?,
-        url: row.get(6)?,
-        download_size: row.get::<_, i64>(7)?.max(0) as u64,
-        installed_size: row.get::<_, i64>(8)?.max(0) as u64,
+        title: row.get(4)?,
+        description: row.get(5)?,
+        repo: row.get(6)?,
+        url: row.get(7)?,
+        download_size: row.get::<_, i64>(8)?.max(0) as u64,
+        installed_size: row.get::<_, i64>(9)?.max(0) as u64,
     })
 }
 
@@ -216,6 +230,7 @@ mod tests {
             name: name.into(),
             version: "2.0-1".into(),
             installed_version: Some("1.0-1".into()),
+            title: Some("A Tool".into()),
             description: Some("A tool".into()),
             repo: Some("extra".into()),
             url: Some("https://example.org".into()),
@@ -235,6 +250,7 @@ mod tests {
     fn roundtrip_preserves_every_field() {
         let mut idx = Index::open_in_memory().unwrap();
         let bare = Package {
+            title: None,
             description: None,
             repo: None,
             url: None,
@@ -483,5 +499,62 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 99);
+    }
+
+    #[test]
+    fn title_roundtrips() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let p = Package {
+            title: Some("Firefox".into()),
+            ..pkg("a", "org.mozilla.firefox", "browser")
+        };
+        idx.replace_source(&sid("a"), &[p.clone()]).unwrap();
+        assert_eq!(idx.get(&sid("a"), "org.mozilla.firefox").unwrap(), Some(p));
+    }
+
+    #[test]
+    fn search_finds_by_title() {
+        let idx = indexed(&[Package {
+            title: Some("Firefox".into()),
+            ..pkg("a", "org.mozilla.firefox", "web browser")
+        }]);
+        assert_eq!(
+            names(idx.search("firefox", 10).unwrap()),
+            ["org.mozilla.firefox"]
+        );
+        assert_eq!(
+            names(idx.search("org.mozilla", 10).unwrap()),
+            ["org.mozilla.firefox"]
+        );
+    }
+
+    #[test]
+    fn schema_1_index_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE packages (id INTEGER PRIMARY KEY, source TEXT NOT NULL,
+                     name TEXT NOT NULL, version TEXT NOT NULL, installed_version TEXT,
+                     description TEXT, repo TEXT, url TEXT, download_size INTEGER NOT NULL,
+                     installed_size INTEGER NOT NULL, UNIQUE (source, name));
+                 CREATE VIRTUAL TABLE packages_fts USING fts5(name, description);
+                 INSERT INTO packages (source, name, version, download_size, installed_size)
+                     VALUES ('a', 'old', '1', 0, 0);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let mut idx = Index::open(&path).expect("a schema 1 index must be rebuilt, not refused");
+        assert_eq!(idx.count().unwrap(), 0);
+        idx.replace_source(&sid("a"), &[pkg("a", "new", "d")])
+            .unwrap();
+        assert_eq!(names(idx.search("new", 10).unwrap()), ["new"]);
+        let version: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 }

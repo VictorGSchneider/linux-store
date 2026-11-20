@@ -27,6 +27,8 @@ pub struct Package {
     /// Newest version the source knows (the installed version for installed-only packages).
     pub version: String,
     pub installed_version: Option<String>,
+    /// Human display name when the source's `name` is an id (e.g. Flatpak `org.mozilla.firefox`).
+    pub title: Option<String>,
     pub description: Option<String>,
     pub repo: Option<String>,
     pub url: Option<String>,

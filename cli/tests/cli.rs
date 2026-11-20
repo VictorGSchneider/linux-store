@@ -132,3 +132,22 @@ fn default_db_path_falls_back_to_home_cache() {
     );
     assert_eq!(default_db_path_from(None, None), None);
 }
+
+#[test]
+fn search_shows_title_before_description() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    let titled = || {
+        FakeBackend::new(
+            "fake",
+            vec![Package {
+                title: Some("Alpha App".into()),
+                ..pkg("fake", "alpha", "first")
+            }],
+        )
+    };
+    run_cli(&["--db", &db, "refresh"], titled());
+    let (code, out, _) = run_cli(&["--db", &db, "search", "alpha"], titled());
+    assert_eq!(code, 0);
+    assert!(out.contains("— Alpha App: first"), "{out}");
+}

@@ -53,11 +53,12 @@ pub fn default_db_path() -> Option<PathBuf> {
 
 fn format_package(p: &Package) -> String {
     let installed = if p.is_installed() { " [installed]" } else { "" };
-    let description = p
-        .description
-        .as_deref()
-        .map(|d| format!(" — {d}"))
-        .unwrap_or_default();
+    let detail = match (p.title.as_deref(), p.description.as_deref()) {
+        (Some(title), Some(description)) => format!(" — {title}: {description}"),
+        (Some(title), None) => format!(" — {title}"),
+        (None, Some(description)) => format!(" — {description}"),
+        (None, None) => String::new(),
+    };
     format!(
         "{}/{} {} {}{}{}",
         p.source,
@@ -65,7 +66,7 @@ fn format_package(p: &Package) -> String {
         p.name,
         p.version,
         installed,
-        description
+        detail
     )
 }
 

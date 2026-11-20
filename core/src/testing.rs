@@ -8,6 +8,7 @@ pub fn pkg(source: &str, name: &str, description: &str) -> Package {
         name: name.into(),
         version: "1.0".into(),
         installed_version: None,
+        title: None,
         description: Some(description.into()),
         repo: None,
         url: None,
