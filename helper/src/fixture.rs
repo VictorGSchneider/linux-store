@@ -13,10 +13,21 @@ pub(crate) struct Fixture {
     dir: TempDir,
 }
 
-fn run_tool(tool: &str, args: &[&std::ffi::OsStr]) {
-    let status = Command::new(tool).args(args).status().unwrap_or_else(|e| {
-        panic!("the test fixture needs `{tool}` (Arch's base-devel provides it): {e}")
-    });
+/// `repo-add` on this system is a Rust program whose parallel instances race on a shared
+/// temporary directory ("Failed to change pwd"), so the fixture runs the tools one at a time.
+static TOOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn run_tool(tool: &str, cwd: &Path, args: &[&std::ffi::OsStr]) {
+    let _one_at_a_time = TOOL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let status = Command::new(tool)
+        .args(args)
+        .current_dir(cwd)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!("the test fixture needs `{tool}` (Arch's base-devel provides it): {e}")
+        });
     assert!(status.success(), "`{tool}` failed: {status}");
 }
 
@@ -69,6 +80,7 @@ impl Fixture {
         let package = self.path("repo").join(&file_name);
         run_tool(
             "bsdtar",
+            &self.path("repo"),
             &[
                 "--zstd".as_ref(),
                 "-cf".as_ref(),
@@ -81,6 +93,7 @@ impl Fixture {
         );
         run_tool(
             "repo-add",
+            &self.path("repo"),
             &[
                 "-q".as_ref(),
                 self.path("repo/test.db.tar.gz").as_os_str(),
@@ -104,11 +117,22 @@ impl Fixture {
 
     /// Makes the system's sync database match the repository, like a finished `pacman -Sy`.
     pub(crate) fn sync(&self) {
-        fs::copy(
-            self.path("repo/test.db.tar.gz"),
-            self.path("db/sync/test.db"),
-        )
-        .unwrap();
+        let target = self.path("db/sync/test.db");
+        fs::copy(self.path("repo/test.db.tar.gz"), &target).unwrap();
+        // libalpm refreshes a database only if the server's copy is newer, with one-second
+        // resolution; backdate ours so a database published right afterwards always is.
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+
+    /// The raw bytes of the system's sync database, to check that it was (not) refreshed.
+    pub(crate) fn sync_db_bytes(&self) -> Vec<u8> {
+        fs::read(self.path("db/sync/test.db")).unwrap()
     }
 
     pub(crate) fn env(&self) -> Environment {

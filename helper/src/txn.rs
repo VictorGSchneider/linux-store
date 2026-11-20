@@ -2,7 +2,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use alpm::{Alpm, TransFlag};
+use alpm::{Alpm, PrepareData, PrepareError, TransFlag};
 use store_protocol::{Change, ChangeKind, ErrorCode};
 
 use crate::events::{self, QuestionLog};
@@ -60,8 +60,16 @@ fn transact(
 ) -> Result<Vec<Change>, HelperError> {
     build(alpm)?;
     gate.checkpoint()?;
-    alpm.trans_prepare()
-        .map_err(|e| map_error(e.error(), "cannot prepare the transaction"))?;
+    if alpm.trans_add().is_empty() && alpm.trans_remove().is_empty() {
+        return Ok(Vec::new()); // nothing to do, e.g. an upgrade of an up-to-date system
+    }
+    alpm.trans_prepare().map_err(|e| {
+        let detail = describe(&e);
+        map_error(
+            e.error(),
+            &format!("cannot prepare the transaction ({detail})"),
+        )
+    })?;
     if !questions.borrow().ambiguous.is_empty() {
         return Err(HelperError::new(
             ErrorCode::Conflict,
@@ -101,4 +109,32 @@ fn plan(alpm: &Alpm) -> Vec<Change> {
         });
     }
     changes
+}
+
+/// Which packages libalpm says are in the way: broken dependencies, conflicts, bad architectures.
+fn describe(error: &PrepareError<'_>) -> String {
+    match error.data() {
+        None => String::from("no further detail"),
+        Some(PrepareData::UnsatisfiedDeps(missing)) => missing
+            .iter()
+            .map(|m| format!("{} needs {}", m.target(), m.depend()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(PrepareData::ConflictingDeps(conflicts)) => conflicts
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} conflicts with {}",
+                    c.package1().name(),
+                    c.package2().name()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(PrepareData::PkgInvalidArch(packages)) => packages
+            .iter()
+            .map(|p| format!("{} has an unsupported architecture", p.name()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }
