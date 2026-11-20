@@ -4526,6 +4526,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "store-helper"
+version = "0.1.0"
+dependencies = [
+ "alpm",
+ "alpm-utils",
+ "pacmanconf",
+ "store-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "store-protocol"
 version = "0.1.0"
 dependencies = [

@@ -1,7 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["gui", "core", "protocol", "backends/pacman", "backends/aur", "backends/flatpak", "cli"]
+members = ["gui", "core", "protocol", "helper", "backends/pacman", "backends/aur", "backends/flatpak", "cli"]
 
 [profile.release]
 codegen-units = 1
 lto = true
+
+# alpm 5.0.2 reads libalpm's event structs as 8-byte aligned, but libalpm passes them 4-byte
+# aligned. Debug builds (tests) abort on the alignment check; release builds do not check.
+# Harmless on x86_64 and aarch64, so only this crate loses its debug assertions.
+[profile.dev.package.alpm]
+debug-assertions = false

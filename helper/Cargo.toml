@@ -1,0 +1,23 @@
+[package]
+name = "store-helper"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Privileged helper that installs, removes and upgrades pacman packages for linux-store"
+
+[lib]
+name = "store_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "store-helper"
+path = "src/main.rs"
+
+[dependencies]
+store-protocol = { path = "../protocol" }
+alpm = "5.0.2"
+alpm-utils = "5.0.0"
+pacmanconf = "3.1.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
