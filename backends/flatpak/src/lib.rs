@@ -275,6 +275,14 @@ impl Collector {
     }
 }
 
+/// True when `value` is exactly one ordinary path component, so joining it onto a directory
+/// cannot leave that directory (no `..`, no absolute path, no subdirectory, not empty).
+fn is_plain_file_name(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 /// Builds a package from a finished `<component>`, or `None` if it is not an application.
 fn finish(c: Component, remote: &str, active: &Path) -> Option<Entry> {
     // `desktop` is the legacy AppStream spelling of `desktop-application`; Flathub still
@@ -310,8 +318,9 @@ fn finish(c: Component, remote: &str, active: &Path) -> Option<Entry> {
         .icons
         .iter()
         .find(|i| i.kind == "cached" && i.width == Some(128))
+        .filter(|i| is_plain_file_name(&i.value))
         .map(|i| active.join("icons/128x128").join(&i.value))
-        .filter(|p| p.exists())
+        .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned());
     Some(Entry {
         package: Package {
