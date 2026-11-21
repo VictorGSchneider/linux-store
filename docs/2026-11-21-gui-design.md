@@ -66,7 +66,7 @@ O `core`, os três backends (pacman, AUR, Flatpak) e o helper privilegiado exist
 
 - O parser hoje dentro de `backends/flatpak` vai para um crate compartilhado `store-appstream`. O backend do pacman passa a ler `/usr/share/swcatalog` (e `/usr/share/app-info`) quando existir, com nome, ícone, categorias e `<pkgname>`. O Flatpak passa a extrair também ícone e categorias.
 - Sem catálogo (`archlinux-appstream-data` ausente), o pacman fica sem ícone e sem categoria; o pacote é dependência opcional, e a máquina de desenvolvimento já o tem.
-- Os ícones do catálogo do Arch são **JPEG XL** (`/usr/share/swcatalog/icons/<origem>/<WxH>/<arquivo>.jxl`); os do Flatpak são PNG. O Slint não carrega JXL, então a GUI decodifica os dois formatos fora do thread da UI (crate `jxl-oxide` para JXL) e entrega pixels RGBA.
+- Os ícones do catálogo do Arch são **JPEG XL** (`/usr/share/swcatalog/icons/<origem>/<WxH>/<arquivo>.jxl`); os do Flatpak são PNG. O Slint não carrega JXL, então a GUI decodifica os dois formatos **em memória**, fora do thread da UI (crate `jxl-oxide` para JXL, decisão do usuário; sem arquivo convertido nem cache no disco), pede 64×64 para os cartões e 128×128 para a página do app, e mantém os pixels decodificados num cache LRU limitado.
 - Medir o custo no refresh. Se pesar, só reler quando o arquivo do catálogo mudar.
 
 ### Metadados de rede (crate novo `store-metadata`)
