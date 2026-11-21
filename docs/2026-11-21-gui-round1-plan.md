@@ -50,7 +50,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 
 ---
 
-### Tarefa 1: Campos novos em `Package` e esquema v3 do índice
+### Task 1: Campos novos em `Package` e esquema v3 do índice
 
 **Arquivos:**
 - Modificar: `core/src/package.rs`, `core/src/index.rs`, `core/src/testing.rs`, e todo literal `Package { .. }` do workspace (`backends/*/src/lib.rs`, `cli/src/lib.rs`, testes)
@@ -65,7 +65,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode `cargo test --workspace --exclude linux-store --features store-core/testing` e veja tudo passar, incluindo o teste existente de migração de índice antigo (um índice v2 é reconstruído).
 - [ ] **Passo 5: commit** `core: Package ganha app_id, categorias, ícone, popularidade e upgradable (índice v3)`.
 
-### Tarefa 2: `Host` e ordem de fontes
+### Task 2: `Host` e ordem de fontes
 
 **Arquivos:**
 - Criar: `core/src/host.rs`; modificar `core/src/lib.rs`, `core/src/store.rs`
@@ -81,7 +81,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode a suíte do workspace (comando das restrições) e veja passar.
 - [ ] **Passo 5: commit** `core: Host e ordem de fontes consciente do sistema`.
 
-### Tarefa 3: crate `store-appstream` e o Flatpak com ícone e categorias
+### Task 3: crate `store-appstream` e o Flatpak com ícone e categorias
 
 **Arquivos:**
 - Criar: `appstream/Cargo.toml`, `appstream/src/lib.rs`; modificar `Cargo.toml` (membros), `backends/flatpak/{Cargo.toml,src/lib.rs}`
@@ -97,7 +97,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 5:** faça o backend Flatpak usar `store_appstream::parse_file`; o ícone é o `cached` de **128** se o arquivo existir em `<active>/icons/<WxH>/`, senão `None`. Rode a suíte do workspace.
 - [ ] **Passo 6: commit** `appstream: parser compartilhado; flatpak: app_id, categorias e ícone`.
 
-### Tarefa 4: pacman lê o catálogo AppStream e marca atualizações
+### Task 4: pacman lê o catálogo AppStream e marca atualizações
 
 **Arquivos:**
 - Modificar: `backends/pacman/{Cargo.toml,src/lib.rs}`
@@ -113,7 +113,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4: medir** (máquina de desenvolvimento, que tem o catálogo): `cargo build --release -p store-cli && time ./target/release/store refresh`. Registre o tempo antes e depois no corpo do commit. Se o refresh do pacman passar de ~1 s a mais, pare e avise o usuário antes de seguir.
 - [ ] **Passo 5: commit** `pacman: enriquece com o catálogo AppStream e marca atualizações`.
 
-### Tarefa 5: popularidade do AUR
+### Task 5: popularidade do AUR
 
 **Arquivos:** modificar `backends/aur/src/lib.rs`; teste no mesmo arquivo.
 
@@ -123,7 +123,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode a suíte do workspace.
 - [ ] **Passo 5: commit** `aur: lê a popularidade do dump`.
 
-### Tarefa 6: `App` (montagem a partir de pacotes ligados)
+### Task 6: `App` (montagem a partir de pacotes ligados)
 
 **Arquivos:** criar `core/src/app.rs`; modificar `core/src/lib.rs`; teste no mesmo arquivo.
 
@@ -137,7 +137,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode os testes do módulo e veja passar.
 - [ ] **Passo 5: commit** `core: App e montagem por chave`.
 
-### Tarefa 7: tabela `app_links` e consultas no `Index`
+### Task 7: tabela `app_links` e consultas no `Index`
 
 **Arquivos:** modificar `core/src/index.rs` (esquema, `replace_source`, consultas); teste no mesmo arquivo.
 
@@ -158,7 +158,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 6:** rode a suíte do workspace.
 - [ ] **Passo 7: commit** `core: tabela app_links e consultas de destaque, contagem e atualizações`.
 
-### Tarefa 8: `Catalog`
+### Task 8: `Catalog`
 
 **Arquivos:** criar `core/src/catalog.rs`; modificar `core/src/lib.rs`; teste no mesmo arquivo.
 
@@ -173,7 +173,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode a suíte do workspace.
 - [ ] **Passo 5: commit** `core: Catalog com busca, página de app, fileiras, instalados e atualizações`.
 
-### Tarefa 9: refresh paralelo com progresso
+### Task 9: refresh paralelo com progresso
 
 **Arquivos:** modificar `core/src/store.rs`; teste no mesmo arquivo.
 
@@ -186,7 +186,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode a suíte do workspace.
 - [ ] **Passo 5: commit** `core: refresh em paralelo por fonte, com progresso`.
 
-### Tarefa 10: crate `store-system` e a CLI usando-o
+### Task 10: crate `store-system` e a CLI usando-o
 
 **Arquivos:**
 - Criar: `system/Cargo.toml`, `system/src/lib.rs`; modificar `Cargo.toml` (membros), `cli/{Cargo.toml,src/main.rs,src/lib.rs}`
@@ -200,7 +200,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 3:** rode a suíte do workspace e `cargo run --locked --release -p store-cli -- --help`.
 - [ ] **Passo 4: commit** `system: backends, instalador e caminho do índice compartilhados; CLI usa o crate`.
 
-### Tarefa 11: ícones e cor de acento (`store-app`)
+### Task 11: ícones e cor de acento (`store-app`)
 
 **Arquivos:**
 - Criar: `app/Cargo.toml` (pacote `store-app`), `app/src/lib.rs`, `app/src/icons.rs`, `app/tests/fixtures/icon.png`, `app/tests/fixtures/icon.jxl`; modificar `Cargo.toml` (membros)
@@ -217,7 +217,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 5:** rode os testes e veja passar.
 - [ ] **Passo 6: commit** `app: decodificação de ícones PNG e JXL, cache LRU e cor de acento`.
 
-### Tarefa 12: `Engine`
+### Task 12: `Engine`
 
 **Arquivos:** criar `app/src/engine.rs`; modificar `app/src/lib.rs`, `app/Cargo.toml` (dependências de `store-core`, `store-protocol`; dev: `store-core` com `testing`); teste em `app/tests/engine.rs`.
 
@@ -241,7 +241,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode `cargo test -p store-app` 20 vezes seguidas (`for i in $(seq 20); do cargo test -p store-app -q || break; done`) para pegar corrida, e a suíte do workspace.
 - [ ] **Passo 5: commit** `app: Engine com threads de consulta, refresh, operações e ícones`.
 
-### Tarefa 13: componentes Slint e tela inicial estática
+### Task 13: componentes Slint e tela inicial estática
 
 **Arquivos:** modificar `gui/ui/app-window.slint`; criar `gui/ui/{theme,card,chip,row,top-bar,home-page}.slint`; modificar `gui/Cargo.toml` e `gui/src/main.rs` (só o necessário para compilar).
 
@@ -257,7 +257,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** verifique: `cargo check -p linux-store` passa; renderize com `SLINT_BACKEND=winit-software cargo run -p linux-store` (ou o preview do plugin) e **olhe** a imagem; confira janelas estreita e larga (a grade reflui, o topo não rola).
 - [ ] **Passo 5: commit** `gui: componentes e tela inicial (dados de exemplo)`.
 
-### Tarefa 14: ligar a tela inicial ao Engine
+### Task 14: ligar a tela inicial ao Engine
 
 **Arquivos:** modificar `gui/Cargo.toml` (dependências `store-app`, `store-core`, `store-system`), `gui/src/main.rs`; criar `gui/src/convert.rs` (de `App`/`Row`/`Rgba` para as structs do Slint) e teste dele.
 
@@ -267,7 +267,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** verifique com `SLINT_BACKEND=winit-software cargo run -p linux-store` (**sem instalar nada**): a janela abre sem esperar a rede, os chips ganham a contagem à medida que cada fonte termina, a busca responde enquanto digita, ícones aparecem. Olhe a imagem.
 - [ ] **Passo 5: commit** `gui: tela inicial, busca e chips ligados ao Engine`.
 
-### Tarefa 15: página do app, instalar, remover e cancelar
+### Task 15: página do app, instalar, remover e cancelar
 
 **Arquivos:** criar `gui/ui/{app-page,operation-bar}.slint`; modificar `gui/ui/app-window.slint`, `gui/src/{main.rs,convert.rs}`.
 
@@ -281,7 +281,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 3:** verifique **sem instalar nada**: abra a página de um app que existe no pacman e no Flatpak (ex. Firefox, se estiver nas duas fontes) e confirme um único app com dois botões na ordem do host (pacman primeiro, flatpak desativado com o motivo); olhe a imagem. Simule a barra de operação com um `Engine` de teste ou com propriedades fixas em depuração e remova depois.
 - [ ] **Passo 4: commit** `gui: página do app com um botão por fonte, instalar, remover e cancelar`.
 
-### Tarefa 16: Installeds e Updates
+### Task 16: Installeds e Updates
 
 **Arquivos:** criar `gui/ui/list-page.slint`; modificar `gui/ui/app-window.slint`, `gui/src/main.rs`.
 
@@ -290,7 +290,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 3:** verifique: as três páginas renderizam (olhe as imagens); `cargo check -p linux-store`.
 - [ ] **Passo 4: commit** `gui: páginas Installeds e Updates`.
 
-### Tarefa 17: documentação, capturas e verificação manual
+### Task 17: documentação, capturas e verificação manual
 
 **Arquivos:** modificar `README.md`, `AGENTS.md`; criar `docs/screenshots/*.png`, `packaging/manual-gui-check.md`.
 
