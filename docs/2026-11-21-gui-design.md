@@ -6,7 +6,7 @@ Complementa `docs/2026-11-18-linux-store-design.md` (etapa 3 das "Etapas") e usa
 
 ## Intenção e porquê
 
-O `core`, os três backends (pacman, AUR, Flatpak) e o helper privilegiado existem, mas só a CLI os usa. A GUI é o que faz a loja aparecer para "qualquer pessoa". O que o usuário pediu, com as palavras dele: uma tela inicial com busca, chips de fonte e fileiras de apps; categorias como no GNOME Software; e **uma página por app que reúne todas as fontes** em que ele existe, com um botão de instalar por fonte. O layout vem dos modelos em `~/Documents/Claude/` (`layoutmodel.png`, `layout model 2.png`, `layout model 3.png`).
+O `core`, os três backends (pacman, AUR, Flatpak) e o helper privilegiado existem, mas só a CLI os usa. A GUI é o que faz a loja aparecer para "qualquer pessoa". O que o usuário pediu, com as palavras dele: uma tela inicial com busca, chips de fonte e fileiras de apps; categorias como no GNOME Software; e **uma página por app que reúne todas as fontes** em que ele existe, com um botão de instalar por fonte. O layout vem dos modelos em `docs/` (`layout model 1.png`, `layout model 2.png`, `layout model 3.png` e o editável `model linux stores.svg`).
 
 ## Objetivos
 
@@ -23,7 +23,7 @@ O `core`, os três backends (pacman, AUR, Flatpak) e o helper privilegiado exist
 
 - Capturas de tela (a página do app inteira com galeria fica para uma segunda rodada; a primeira entrega ícone, textos, tamanhos e links).
 - Avaliações (ODRS) e Repology.
-- Backends novos (snap, AppImage, apt, dnf). Os chips deles aparecem esmaecidos com o motivo de indisponibilidade, se o backend não existir. *(minha decisão: o design original só mostra fontes disponíveis, mas o modelo do usuário mostra todos os chips.)*
+- Backends novos (snap, AppImage, apt, dnf). Os chips mostram **só as fontes disponíveis** (decisão do usuário, 2026-11-21); o modelo desenha todos os chips como exemplo. O motivo de uma fonte estar indisponível aparece em Settings.
 - Categorias para o AUR e para pacotes do pacman sem catálogo AppStream.
 - Tema escuro/claro configurável, internacionalização, acessibilidade avançada.
 
