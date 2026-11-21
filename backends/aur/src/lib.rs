@@ -48,7 +48,18 @@ impl AurBackend {
             DumpSource::Url(url) => {
                 let config = ureq::Agent::config_builder()
                     .timeout_connect(Some(Duration::from_secs(10)))
-                    .timeout_global(Some(Duration::from_secs(120)))
+                    // A slow link must not be cut off while data keeps arriving, but a stalled
+                    // one must not hang a refresh: limit each wait, and the whole download loosely.
+                    .timeout_per_read(Some(Duration::from_secs(30)))
+                    .timeout_global(Some(Duration::from_secs(15 * 60)))
+                    .max_redirects(3)
+                    // The system's certificate store, so a distro's CA updates and revocations
+                    // apply, instead of a copy of Mozilla's roots frozen into the binary.
+                    .tls_config(
+                        ureq::tls::TlsConfig::builder()
+                            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                            .build(),
+                    )
                     .user_agent(USER_AGENT)
                     .build();
                 let response = ureq::Agent::new_with_config(config)
@@ -143,6 +154,11 @@ impl Backend for AurBackend {
             seen: HashSet::new(),
         };
         json.deserialize_seq(&mut collect)
+            .map_err(|e| backend_error(format!("invalid dump: {e}")))?;
+        // The array being complete is not enough: `end` rejects anything but whitespace after it
+        // and reads to the end of the stream, which makes the gzip decoder check its CRC32 and
+        // length. A damaged or padded download must not be taken for a good one.
+        json.end()
             .map_err(|e| backend_error(format!("invalid dump: {e}")))?;
         // An empty list is never a real AUR; refusing it keeps a bad download from wiping the index.
         if collect.packages.is_empty() {
