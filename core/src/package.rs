@@ -20,7 +20,7 @@ impl fmt::Display for SourceId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Package {
     pub source: SourceId,
     pub name: String,
@@ -34,6 +34,15 @@ pub struct Package {
     pub url: Option<String>,
     pub download_size: u64,
     pub installed_size: u64,
+    /// AppStream component id (e.g. `org.mozilla.firefox`), when the source knows one.
+    pub app_id: Option<String>,
+    /// AppStream categories as written, e.g. `Network`.
+    pub categories: Vec<String>,
+    /// Absolute path of a local icon file.
+    pub icon: Option<String>,
+    pub popularity: Option<f64>,
+    /// An installed package that has a newer version available.
+    pub upgradable: bool,
 }
 
 impl Package {

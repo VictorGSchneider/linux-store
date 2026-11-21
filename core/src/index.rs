@@ -4,7 +4,7 @@ use rusqlite::{Connection, Row, params};
 
 use crate::{Error, Package, Result, SourceId};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS packages (
@@ -19,17 +19,23 @@ const SCHEMA: &str = "
         url TEXT,
         download_size INTEGER NOT NULL,
         installed_size INTEGER NOT NULL,
+        app_id TEXT,
+        categories TEXT NOT NULL DEFAULT '[]',
+        icon TEXT,
+        popularity REAL,
+        upgradable INTEGER NOT NULL DEFAULT 0,
         UNIQUE (source, name)
     );
     CREATE INDEX IF NOT EXISTS packages_name_lower ON packages (lower(name));
     CREATE INDEX IF NOT EXISTS packages_title_lower ON packages (lower(title));
+    CREATE INDEX IF NOT EXISTS packages_app_id ON packages (app_id);
     CREATE VIRTUAL TABLE IF NOT EXISTS packages_fts
         USING fts5(name, title, description, tokenize = 'unicode61');
 ";
 
 /// Columns of `packages`, in the order `row_to_package` reads them.
 const COLUMNS: &str = "source, name, version, installed_version, title, description, repo, url, \
-                       download_size, installed_size";
+                       download_size, installed_size, app_id, categories, icon, popularity, upgradable";
 
 /// Local SQLite index of every package known to every source.
 pub struct Index {
@@ -84,8 +90,9 @@ impl Index {
         {
             let mut insert = tx.prepare(
                 "INSERT INTO packages (source, name, version, installed_version, title, description, \
-                 repo, url, download_size, installed_size) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 repo, url, download_size, installed_size, app_id, categories, icon, popularity, \
+                 upgradable) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             let mut insert_fts = tx.prepare(
                 "INSERT INTO packages_fts (rowid, name, title, description) VALUES (?1, ?2, ?3, ?4)",
@@ -102,6 +109,11 @@ impl Index {
                     p.url,
                     to_sql_size(p.download_size),
                     to_sql_size(p.installed_size),
+                    p.app_id,
+                    categories_to_sql(&p.categories),
+                    p.icon,
+                    p.popularity,
+                    p.upgradable,
                 ])?;
                 let id = tx.last_insert_rowid();
                 insert_fts.execute(params![
@@ -341,7 +353,21 @@ fn row_to_package(row: &Row<'_>) -> rusqlite::Result<Package> {
         url: row.get(7)?,
         download_size: row.get::<_, i64>(8)?.max(0) as u64,
         installed_size: row.get::<_, i64>(9)?.max(0) as u64,
+        app_id: row.get(10)?,
+        categories: categories_from_sql(&row.get::<_, String>(11)?),
+        icon: row.get(12)?,
+        popularity: row.get(13)?,
+        upgradable: row.get(14)?,
     })
+}
+
+/// Categories are stored as a JSON array, so a category containing `;` or `,` survives.
+fn categories_to_sql(categories: &[String]) -> String {
+    serde_json::to_string(categories).unwrap_or_else(|_| "[]".into())
+}
+
+fn categories_from_sql(text: &str) -> Vec<String> {
+    serde_json::from_str(text).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -366,6 +392,11 @@ mod tests {
             url: Some("https://example.org".into()),
             download_size: 1234,
             installed_size: 5678,
+            app_id: None,
+            categories: Vec::new(),
+            icon: None,
+            popularity: None,
+            upgradable: false,
         }
     }
 
@@ -393,6 +424,35 @@ mod tests {
         assert_eq!(idx.get(&sid("a"), "rich").unwrap(), Some(rich));
         assert_eq!(idx.get(&sid("a"), "bare").unwrap(), Some(bare));
         assert_eq!(idx.get(&sid("a"), "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn index_round_trips_new_package_fields() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let p = Package {
+            app_id: Some("org.mozilla.firefox".into()),
+            categories: vec!["Network".into(), "WebBrowser".into()],
+            icon: Some("/x/y.jxl".into()),
+            popularity: Some(1.5),
+            upgradable: true,
+            ..full("a", "firefox")
+        };
+        idx.replace_source(&sid("a"), std::slice::from_ref(&p))
+            .unwrap();
+        assert_eq!(idx.get(&sid("a"), "firefox").unwrap(), Some(p));
+    }
+
+    #[test]
+    fn categories_with_semicolon_are_not_split_wrongly() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let p = Package {
+            categories: vec!["A;B".into(), "C".into()],
+            ..full("a", "x")
+        };
+        idx.replace_source(&sid("a"), std::slice::from_ref(&p))
+            .unwrap();
+        let got = idx.get(&sid("a"), "x").unwrap().unwrap();
+        assert_eq!(got.categories, vec!["A;B".to_string(), "C".to_string()]);
     }
 
     #[test]
@@ -686,7 +746,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -867,7 +927,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

@@ -120,6 +120,11 @@ impl Backend for PacmanBackend {
                     url: p.url().map(str::to_string),
                     download_size: clamp(p.size()),
                     installed_size: clamp(p.isize()),
+                    app_id: None,
+                    categories: Vec::new(),
+                    icon: None,
+                    popularity: None,
+                    upgradable: false,
                 });
             }
         }
@@ -139,6 +144,11 @@ impl Backend for PacmanBackend {
                 url: p.url().map(str::to_string),
                 download_size: 0,
                 installed_size: clamp(p.isize()),
+                app_id: None,
+                categories: Vec::new(),
+                icon: None,
+                popularity: None,
+                upgradable: false,
             });
         }
         Ok(packages)

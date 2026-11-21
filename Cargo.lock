@@ -4621,6 +4621,7 @@ name = "store-core"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "store-protocol",
  "tempfile",
  "thiserror 2.0.21",

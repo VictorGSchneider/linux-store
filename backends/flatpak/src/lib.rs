@@ -234,6 +234,11 @@ impl Backend for FlatpakBackend {
                 url: None,
                 download_size: 0,
                 installed_size: 0,
+                app_id: None,
+                categories: Vec::new(),
+                icon: None,
+                popularity: None,
+                upgradable: false,
             });
         }
         Ok(packages)
@@ -482,6 +487,11 @@ fn finish(c: Component, remote: &str) -> Option<Entry> {
             url: c.homepage,
             download_size: 0,
             installed_size: 0,
+            app_id: None,
+            categories: Vec::new(),
+            icon: None,
+            popularity: None,
+            upgradable: false,
         },
         stable,
     })
