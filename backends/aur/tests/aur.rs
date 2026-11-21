@@ -80,6 +80,20 @@ fn parses_entries() {
 }
 
 #[test]
+fn popularity_is_read_from_the_dump() {
+    let json = r#"[
+        {"Name":"a","Version":"1","Popularity":2.5},
+        {"Name":"b","Version":"1"},
+        {"Name":"c","Version":"1","Popularity":null}
+    ]"#;
+    let (_dir, backend) = backend_for(&gz(json));
+    let packages = backend.packages().unwrap();
+    assert_eq!(packages[0].popularity, Some(2.5));
+    assert_eq!(packages[1].popularity, None);
+    assert_eq!(packages[2].popularity, None);
+}
+
+#[test]
 fn ignores_unknown_fields() {
     let json = r#"[{"Name":"x","Version":"1","Brand":{"new":true},"Another":null}]"#;
     let (_dir, backend) = backend_for(&gz(json));
