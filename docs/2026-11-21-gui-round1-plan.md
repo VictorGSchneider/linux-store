@@ -19,7 +19,7 @@
 - Rodada 1 **não tem**: categorias, barra lateral, Settings, cartão duplo, `store-metadata`, capturas de tela, instalador de Flatpak/AUR.
 - Chips: só fontes com pacotes no índice. Ordem de fontes: nativa do host, flatpak, depois `pacman, aur, snap, appimage`, o resto por nome.
 - Juntar apps só por `app_id` do AppStream ou nome idêntico (minúsculas); um app tem no máximo uma variante por fonte. A correspondência vive na tabela `app_links` do índice, que é uma função pura de `packages` e se refaz sozinha a cada `replace_source`.
-- Ícones: 64×64 nos cartões, 128×128 na página do app, decodificados em memória (PNG e JXL), cache LRU, sem arquivos convertidos.
+- Ícones: um único arquivo por pacote (`Package.icon`: 64×64 no pacman, 128×128 no Flatpak), usado nos cartões e na página do app (a página só o escala; um ícone maior fica para a rodada 2). Decodificados em memória (PNG e JXL), cache LRU, sem arquivos convertidos.
 - Dependências novas com `cargo add` e `Cargo.lock` versionado (o CI usa `--locked`).
 - Antes de cada push: `cargo fmt --all --check`; `cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings`; `cargo test --workspace --exclude linux-store --features store-core/testing`; `cargo check -p linux-store`.
 
@@ -105,7 +105,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 
 **Interfaces:**
 - Consome: `store_appstream::parse_file`, `Package` da Tarefa 1.
-- Produz: `PacmanBackend::with_catalog_dirs(self, dirs: &[PathBuf]) -> PacmanBackend` (padrão `/usr/share/swcatalog` e `/usr/share/app-info`; cada diretório tem `xml/*.xml[.gz]` e `icons/<origem>/<WxH>/`).
+- Produz: `PacmanBackend::with_catalog_dirs(self, dirs: &[PathBuf]) -> PacmanBackend` (cada diretório tem `xml/*.xml[.gz]` e `icons/<origem>/<WxH>/`). `from_system()` usa por padrão `/usr/share/swcatalog` e `/usr/share/app-info`; `with_paths(..)` (testes) **não usa nenhum catálogo** até `with_catalog_dirs`, para os testes não dependerem da máquina.
 
 - [ ] **Passo 1: testes que falham**: `catalog_enriches_packages_by_pkgname` (catálogo de exemplo com `<pkgname>firefox</pkgname>`, `app_id`, categorias e ícone cached 64; o pacote `firefox` do repositório de teste ganha `app_id`, `categories`, `title = Some("Firefox")` e `icon` apontando para `<dir>/icons/<origem>/64x64/<arquivo>`), `missing_catalog_changes_nothing`, `corrupt_catalog_is_ignored_not_an_error`, `package_is_upgradable_when_repo_version_is_newer` e `local_newer_than_repo_is_not_upgradable` (use o `alpm::vercmp`; os testes existentes do crate montam bancos de exemplo, reaproveite).
 - [ ] **Passo 2:** rode `cargo test -p store-backend-pacman` (debug está ok: o `alpm` tem asserts desligados no `Cargo.toml` raiz) e veja falhar.
@@ -142,7 +142,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 **Arquivos:** modificar `core/src/index.rs` (esquema, `replace_source`, consultas); teste no mesmo arquivo.
 
 **Interfaces:**
-- Esquema (ainda v3, mesma migração da Tarefa 1): `app_links (source TEXT NOT NULL, name TEXT NOT NULL, app_key TEXT NOT NULL, PRIMARY KEY (source, name))` e `CREATE INDEX app_links_key ON app_links (app_key)`. A tabela é uma **função pura de `packages`**: pode ser apagada e refeita a qualquer momento.
+- Esquema (`SCHEMA_VERSION` sobe para **4**, o índice é só cache e se reconstrói; assim um índice v3 da Tarefa 1 ganha a tabela): `app_links (source TEXT NOT NULL, name TEXT NOT NULL, app_key TEXT NOT NULL, PRIMARY KEY (source, name))` e `CREATE INDEX app_links_key ON app_links (app_key)`. A tabela é uma **função pura de `packages`**: pode ser apagada e refeita a qualquer momento.
 - Regra da chave de cada pacote `p`, calculada em SQL (uma instrução, com `row_number()` para o item 2):
   1. base = `p.app_id`, senão o menor `app_id` não nulo entre os pacotes de **nome igual em minúsculas** (de qualquer fonte), senão `lower(p.name)`;
   2. dois pacotes com a mesma base e a mesma fonte: o de menor `name` fica com a base e cada outro recebe `base || '#' || name` (um app nunca tem duas variantes da mesma fonte);
@@ -277,7 +277,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - Propriedades: `in property <AppPageData> app-page`, `in property <bool> op-active`, `in property <string> op-message`, `in property <int> op-percent` (-1 sem percentual); callbacks `back()`, `install-clicked(string)`, `remove-clicked(string)`, `cancel-clicked()`, `open-link(string)`.
 
 - [ ] **Passo 1: testes que falham** em `convert.rs`: `source_buttons_follow_variant_order`, `non_installable_source_is_disabled_with_a_reason` (`"no installer for this source yet"`), `installed_variant_offers_remove`, `size_is_human_readable` (0 bytes → `"—"`, 1536 → `"1.5 KiB"`).
-- [ ] **Passo 2:** implemente a conversão; `card-clicked` envia `Open { key }` e o `AppPage` abre a página; um clique em instalar/remover envia o comando e mostra a barra de operação com a mensagem e o percentual; **Cancelar** envia `CancelOperation`. Ao `Operation(Finished(..))`, a barra some (sucesso ou erro) e uma mensagem de erro, se houver, aparece na página. Botões de instalar ficam desativados enquanto `op-active`.
+- [ ] **Passo 2:** implemente a conversão; `card-clicked` envia `Open { key }` e o `AppPage` abre a página; um clique em instalar/remover envia o comando e mostra a barra de operação com a mensagem e o percentual; **Cancelar** envia `CancelOperation`. Ao `Operation(Finished(..))`, a barra some (sucesso ou erro) e uma mensagem de erro, se houver, aparece na página. Botões de instalar ficam desativados enquanto `op-active`. `open-link` abre a página do projeto com `xdg-open`, só para URLs `http://` ou `https://` (qualquer outro esquema é ignorado), sem esperar o processo terminar e sem passar pelo shell.
 - [ ] **Passo 3:** verifique **sem instalar nada**: abra a página de um app que existe no pacman e no Flatpak (ex. Firefox, se estiver nas duas fontes) e confirme um único app com dois botões na ordem do host (pacman primeiro, flatpak desativado com o motivo); olhe a imagem. Simule a barra de operação com um `Engine` de teste ou com propriedades fixas em depuração e remova depois.
 - [ ] **Passo 4: commit** `gui: página do app com um botão por fonte, instalar, remover e cancelar`.
 
