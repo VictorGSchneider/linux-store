@@ -165,10 +165,19 @@ fn missing_catalog_changes_nothing() {
 #[test]
 fn corrupt_catalog_is_ignored_not_an_error() {
     let fx = fixture::build();
-    let cat = write_catalog("<components><component", None);
-    std::fs::write(cat.path().join("xml/extra.xml.gz"), "not gzip").unwrap();
+    let cat = write_catalog(&firefox_xml("firefox.jxl"), Some("firefox.jxl"));
+    // Sorts before core.xml, so an early return on the first failure would skip the valid file.
+    std::fs::write(cat.path().join("xml/a-corrupt.xml.gz"), "not gzip").unwrap();
+    std::fs::write(
+        cat.path().join("xml/b-corrupt.xml"),
+        "<components><component",
+    )
+    .unwrap();
     let packages = catalog_backend(&fx, cat.path()).packages().unwrap();
-    assert_eq!(find(&packages, "firefox").app_id, None);
+    let ff = find(&packages, "firefox");
+    assert_eq!(ff.app_id.as_deref(), Some("org.mozilla.firefox"));
+    assert_eq!(ff.categories, vec!["Network", "WebBrowser"]);
+    assert!(ff.icon.is_some());
 }
 
 #[test]
