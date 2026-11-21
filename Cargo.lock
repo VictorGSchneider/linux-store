@@ -4605,6 +4605,7 @@ dependencies = [
  "alpm-utils",
  "flate2",
  "pacmanconf",
+ "store-appstream",
  "store-core",
  "tar",
  "tempfile",

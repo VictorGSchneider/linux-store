@@ -1,5 +1,5 @@
-//! Builds a tiny fake pacman root: sync repo `core` with `hello` and `world`, and a local db
-//! with `hello` (older) and `foreign` (in no repo).
+//! Builds a tiny fake pacman root: sync repo `core` with `hello`, `world`, `firefox` and `ahead`,
+//! and a local db with `hello` (older), `ahead` (newer than the repo) and `foreign` (in no repo).
 //!
 //! libalpm derives name/version of a sync entry from its directory name `name-version`, the
 //! local db needs `ALPM_DB_VERSION`, and the local `desc` uses `%SIZE%` for the installed size.
@@ -33,6 +33,14 @@ fn sync_entries() -> Vec<(&'static str, &'static str)> {
             "world-2.0-1",
             "%NAME%\nworld\n\n%VERSION%\n2.0-1\n\n%CSIZE%\n10\n\n%ISIZE%\n20\n",
         ),
+        (
+            "firefox-2.0-1",
+            "%NAME%\nfirefox\n\n%VERSION%\n2.0-1\n\n%CSIZE%\n10\n\n%ISIZE%\n20\n",
+        ),
+        (
+            "ahead-1.0-1",
+            "%NAME%\nahead\n\n%VERSION%\n1.0-1\n\n%CSIZE%\n10\n\n%ISIZE%\n20\n",
+        ),
     ]
 }
 
@@ -64,6 +72,10 @@ pub fn build() -> Fixture {
         (
             "hello-1.0-1",
             "%NAME%\nhello\n\n%VERSION%\n1.0-1\n\n%SIZE%\n5000\n",
+        ),
+        (
+            "ahead-2.0-1",
+            "%NAME%\nahead\n\n%VERSION%\n2.0-1\n\n%SIZE%\n5\n",
         ),
         (
             "foreign-3-1",

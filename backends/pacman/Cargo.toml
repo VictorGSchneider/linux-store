@@ -10,6 +10,7 @@ store-core = { path = "../../core" }
 alpm = "5.0.2"
 alpm-utils = "5.0.0"
 pacmanconf = "3.1.0"
+store-appstream = { version = "0.1.0", path = "../../appstream" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
