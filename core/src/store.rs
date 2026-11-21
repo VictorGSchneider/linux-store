@@ -70,6 +70,31 @@ impl Store {
         self.index.search(query, limit)
     }
 
+    /// The best `limit` matches of every source that has any, grouped by source: pacman first,
+    /// then Flatpak, then the AUR (least trusted last), then any other source by name.
+    pub fn search_by_source(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(SourceId, Vec<Package>)>> {
+        let mut sources = self.index.sources()?;
+        let rank = |s: &SourceId| match s.to_string().as_str() {
+            "pacman" => 0,
+            "flatpak" => 1,
+            "aur" => 2,
+            _ => 3,
+        };
+        sources.sort_by_key(|s| (rank(s), s.to_string()));
+        let mut groups = Vec::new();
+        for source in sources {
+            let found = self.index.search_in(query, limit, Some(&source))?;
+            if !found.is_empty() {
+                groups.push((source, found));
+            }
+        }
+        Ok(groups)
+    }
+
     pub fn installed(&self) -> Result<Vec<Package>> {
         self.index.installed()
     }
@@ -260,5 +285,33 @@ mod tests {
         let found = store.search("dup", 10).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].version, "1.0");
+    }
+
+    #[test]
+    fn search_by_source_groups_in_a_fixed_order_and_limits_each_source() {
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                boxed(FakeBackend::new(
+                    "aur",
+                    vec![pkg("aur", "tool-a", "x"), pkg("aur", "tool-b", "x")],
+                )),
+                boxed(FakeBackend::new("zzz", vec![pkg("zzz", "tool-z", "x")])),
+                boxed(FakeBackend::new(
+                    "flatpak",
+                    vec![pkg("flatpak", "tool-f", "x")],
+                )),
+                boxed(FakeBackend::new(
+                    "pacman",
+                    vec![pkg("pacman", "tool-p", "x")],
+                )),
+                boxed(FakeBackend::new("empty", vec![pkg("empty", "other", "y")])),
+            ],
+        );
+        store.refresh();
+        let groups = store.search_by_source("tool", 1).unwrap();
+        let order: Vec<String> = groups.iter().map(|(s, _)| s.to_string()).collect();
+        assert_eq!(order, ["pacman", "flatpak", "aur", "zzz"]);
+        assert!(groups.iter().all(|(_, found)| found.len() == 1));
     }
 }

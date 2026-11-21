@@ -44,7 +44,7 @@ fn search_prints_matching_lines() {
     let dir = tempfile::tempdir().unwrap();
     let db = db(&dir);
     run_cli(&["--db", &db, "refresh"], fake());
-    let (code, out, _) = run_cli(&["--db", &db, "search", "alpha"], fake());
+    let (code, out, _) = run_cli(&["--db", &db, "search", "--plain", "alpha"], fake());
     assert_eq!(code, 0);
     assert!(out.contains("fake/- alpha 1.0 — first"), "{out}");
     assert!(!out.contains("beta"), "{out}");
@@ -150,7 +150,7 @@ fn search_shows_title_before_description() {
         )
     };
     run_cli(&["--db", &db, "refresh"], titled());
-    let (code, out, _) = run_cli(&["--db", &db, "search", "alpha"], titled());
+    let (code, out, _) = run_cli(&["--db", &db, "search", "--plain", "alpha"], titled());
     assert_eq!(code, 0);
     assert!(out.contains("— Alpha App: first"), "{out}");
 }
@@ -402,7 +402,7 @@ fn search_output_cannot_inject_terminal_escapes() {
         )
     };
     run_cli(&["--db", &db, "refresh"], backend());
-    let (code, out, _) = run_cli(&["--db", &db, "search", "alpha"], backend());
+    let (code, out, _) = run_cli(&["--db", &db, "search", "--plain", "alpha"], backend());
     assert_eq!(code, 0);
     assert!(!out.contains('\u{1b}'), "{out:?}");
     assert!(out.contains("description"), "{out}");
@@ -457,4 +457,98 @@ fn an_unavailable_source_shows_its_reason() {
         out.contains("fake: unavailable (no catalog found)"),
         "{out}"
     );
+}
+
+fn two_sources() -> Vec<Box<dyn store_core::Backend>> {
+    vec![
+        Box::new(FakeBackend::new(
+            "aur",
+            vec![pkg("aur", "tool-aur", "from the aur")],
+        )),
+        Box::new(FakeBackend::new(
+            "pacman",
+            vec![pkg(
+                "pacman",
+                "tool-repo-with-a-rather-long-name",
+                "from a repo",
+            )],
+        )),
+    ]
+}
+
+fn run_two(args: &[&str]) -> (i32, String) {
+    let argv: Vec<OsString> = std::iter::once("store")
+        .chain(args.iter().copied())
+        .map(OsString::from)
+        .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let installer = FakeInstaller::new(vec![], Ok(()));
+    let code = run(
+        &argv,
+        |path| Ok(Store::new(Index::open(path)?, two_sources())),
+        &installer,
+        &mut out,
+        &mut err,
+    );
+    (code, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn search_puts_each_source_in_its_own_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    run_two(&["--db", &db, "refresh"]);
+    let (code, out) = run_two(&["--db", &db, "search", "--width", "60", "tool"]);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = out.lines().collect();
+    // pacman comes before aur, side by side on the same lines
+    assert!(
+        lines[0].starts_with("pacman") && lines[0].contains("aur"),
+        "{out}"
+    );
+    // positions in characters: the shortened name contains a multi-byte `…`
+    let chars_before = |line: &str, needle: &str| {
+        line.find(needle)
+            .map(|at| line[..at].chars().count())
+            .unwrap()
+    };
+    let header = chars_before(lines[0], "aur");
+    let row = lines
+        .iter()
+        .find(|l| l.contains("tool-aur"))
+        .expect("aur row");
+    assert_eq!(
+        chars_before(row, "tool-aur"),
+        header,
+        "columns must line up:\n{out}"
+    );
+    assert!(
+        lines.iter().all(|l| l.chars().count() <= 60),
+        "no line wider than --width:\n{out}"
+    );
+    assert!(out.contains('…'), "the long name is shortened:\n{out}");
+}
+
+#[test]
+fn search_plain_keeps_one_package_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    run_two(&["--db", &db, "refresh"]);
+    let (_, out) = run_two(&["--db", &db, "search", "--plain", "tool"]);
+    assert!(out.contains("aur/- tool-aur 1.0 — from the aur"), "{out}");
+    assert!(
+        out.contains("pacman/- tool-repo-with-a-rather-long-name 1.0 — from a repo"),
+        "{out}"
+    );
+}
+
+#[test]
+fn search_with_one_source_hit_is_a_single_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    run_two(&["--db", &db, "refresh"]);
+    let (code, out) = run_two(&["--db", &db, "search", "--width", "40", "tool-aur"]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("aur"), "{out}");
+    assert!(!out.contains("pacman"), "{out}");
 }

@@ -141,6 +141,30 @@ impl Index {
     /// bm25 (name and title weighted 10x over description), then shorter name, then name. An exact
     /// title counts as an exact name.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Package>> {
+        self.search_in(query, limit, None)
+    }
+
+    /// The sources that have at least one package indexed.
+    pub fn sources(&self) -> Result<Vec<SourceId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT source FROM packages ORDER BY source")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|s| SourceId::new(&s))
+            .collect())
+    }
+
+    /// Like [`Index::search`], optionally restricted to one source.
+    pub fn search_in(
+        &self,
+        query: &str,
+        limit: usize,
+        source: Option<&SourceId>,
+    ) -> Result<Vec<Package>> {
+        let source = source.map(|s| s.to_string());
         let terms: Vec<&str> = query
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| !t.is_empty())
@@ -156,7 +180,7 @@ impl Index {
             && term.len() <= 2
             && term.is_ascii()
         {
-            return self.search_name_prefix(&term.to_ascii_lowercase(), limit);
+            return self.search_name_prefix(&term.to_ascii_lowercase(), limit, source.as_deref());
         }
         let last = terms.len() - 1;
         let fts_query = terms
@@ -179,7 +203,7 @@ impl Index {
         let sql = format!(
             "SELECT {columns} FROM packages_fts \
              JOIN packages p ON p.id = packages_fts.rowid \
-             WHERE packages_fts MATCH ?1 \
+             WHERE packages_fts MATCH ?1 AND (?5 IS NULL OR p.source = ?5) \
              ORDER BY (lower(p.name) = lower(?2) OR lower(p.name) = ?4 \
                        OR lower(coalesce(p.title, '')) = lower(?2)) DESC, \
                       (substr(lower(p.name), 1, length(?2)) = lower(?2) \
@@ -195,6 +219,7 @@ impl Index {
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 // "firefox developer edition" is the package firefox-developer-edition
                 terms.join("-").to_lowercase(),
+                source,
             ],
             row_to_package,
         )?;
@@ -203,20 +228,32 @@ impl Index {
 
     /// Packages whose lowercased name or title starts with `prefix` (ASCII, lowercase, non-empty):
     /// an exact name or title first, then shorter names, then by name.
-    fn search_name_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Package>> {
+    fn search_name_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+        source: Option<&str>,
+    ) -> Result<Vec<Package>> {
         let mut upper = prefix.to_string();
         let last = upper.pop().expect("prefix is not empty");
         upper.push(char::from(last as u8 + 1));
         let sql = format!(
             "SELECT {COLUMNS} FROM packages \
-             WHERE (lower(name) >= ?1 AND lower(name) < ?2) \
-                OR (lower(title) >= ?1 AND lower(title) < ?2) \
-             ORDER BY (lower(name) = ?1 OR lower(title) = ?1) DESC, length(name), name, source \
+             WHERE ((lower(name) >= ?1 AND lower(name) < ?2) \
+                OR (lower(title) >= ?1 AND lower(title) < ?2)) \
+               AND (?4 IS NULL OR source = ?4) \
+             ORDER BY (lower(name) = ?1 OR coalesce(lower(title), '') = ?1) DESC, \
+                      length(coalesce(title, name)), name, source \
              LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![prefix, upper, i64::try_from(limit).unwrap_or(i64::MAX)],
+            params![
+                prefix,
+                upper,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                source
+            ],
             row_to_package,
         )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -831,5 +868,46 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn short_queries_rank_by_name_length_whether_or_not_there_is_a_title() {
+        // A missing title must not sort after a present one (NULL vs 0 in the exact-match key).
+        let idx = indexed(&[
+            Package {
+                title: Some("Qt Creator".into()),
+                ..pkg("a", "org.qt.creator.long", "ide")
+            },
+            pkg("a", "qt5", "no title here"),
+        ]);
+        assert_eq!(
+            names(idx.search("qt", 10).unwrap()),
+            ["qt5", "org.qt.creator.long"]
+        );
+    }
+
+    #[test]
+    fn a_source_filter_applies_to_both_search_paths() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.replace_source(
+            &SourceId::new("a"),
+            &[
+                pkg("a", "qtool", "a tool"),
+                pkg("a", "toolbox", "a box of tools"),
+            ],
+        )
+        .unwrap();
+        idx.replace_source(
+            &SourceId::new("b"),
+            &[pkg("b", "qtile", "a tiler"), pkg("b", "toolchain", "tools")],
+        )
+        .unwrap();
+        let a = SourceId::new("a");
+        assert_eq!(names(idx.search_in("qt", 10, Some(&a)).unwrap()), ["qtool"]);
+        assert_eq!(
+            names(idx.search_in("tool", 10, Some(&a)).unwrap()),
+            ["toolbox", "qtool"]
+        );
+        assert_eq!(idx.search_in("qt", 10, None).unwrap().len(), 2);
     }
 }

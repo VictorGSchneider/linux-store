@@ -120,6 +120,10 @@ cargo run --release -p store-cli -- search firefox
 cargo run --release -p store-cli -- installed
 ```
 
+`search` shows one column per source (pacman, Flatpak, AUR, then any other), each with its best
+matches and a `✓` on what is installed; `--plain` prints one package per line with its description,
+for scripts, and `--width` and `--limit` set the total width and the rows per column.
+
 `refresh`, `search` and `installed` are read-only: they never write to pacman's or Flatpak's
 data. The AUR dump is downloaded on every refresh (about 15 MB). On an Arch system with about 145,000
 packages in total (pacman, Flatpak and the AUR), refresh takes about 5 seconds, mostly the
