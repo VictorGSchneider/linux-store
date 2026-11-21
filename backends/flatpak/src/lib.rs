@@ -2,13 +2,9 @@
 //! disk for every remote, streaming the XML so the 48 MiB Flathub file is never held whole.
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use flate2::read::GzDecoder;
-use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use store_appstream::Component;
 use store_core::{Backend, Error, Package, Result, SourceId};
 
 const SOURCE: &str = "flatpak";
@@ -207,7 +203,12 @@ impl Backend for FlatpakBackend {
                     catalog.active.display()
                 )));
             };
-            parse_catalog(file, &catalog.remote, &mut collector).map_err(backend_error)?;
+            store_appstream::parse_file(file, &mut |c| {
+                if let Some(entry) = finish(c, &catalog.remote, &catalog.active) {
+                    collector.insert(entry);
+                }
+            })
+            .map_err(backend_error)?;
         }
         let mut installed = self.installed_apps();
         let mut packages = Vec::with_capacity(collector.entries.len() + installed.len());
@@ -274,179 +275,8 @@ impl Collector {
     }
 }
 
-#[derive(Default)]
-struct Component {
-    kind: String,
-    id: String,
-    name: Option<String>,
-    summary: Option<String>,
-    homepage: Option<String>,
-    bundle: Option<String>,
-    /// (timestamp, version), in document order.
-    releases: Vec<(u64, String)>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Field {
-    Id,
-    Name,
-    Summary,
-    Homepage,
-    Bundle,
-}
-
-fn attribute(e: &BytesStart, key: &[u8]) -> Option<String> {
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.as_ref() == key)
-        .map(
-            |a| match a.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
-                Ok(value) => value.into_owned(),
-                Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
-            },
-        )
-}
-
-fn open(path: &Path) -> std::result::Result<Box<dyn Read>, String> {
-    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if path.extension().is_some_and(|ext| ext == "gz") {
-        Ok(Box::new(GzDecoder::new(file)))
-    } else {
-        Ok(Box::new(file))
-    }
-}
-
-fn parse_catalog(
-    path: &Path,
-    remote: &str,
-    collector: &mut Collector,
-) -> std::result::Result<(), String> {
-    let mut xml = Reader::from_reader(BufReader::new(open(path)?));
-    let mut buf = Vec::new();
-    let mut path_stack: Vec<Vec<u8>> = Vec::new();
-    let mut component: Option<Component> = None;
-    let mut field: Option<Field> = None;
-    let mut text = String::new();
-    let mut saw_root = false;
-
-    loop {
-        let event = xml
-            .read_event_into(&mut buf)
-            .map_err(|e| format!("invalid XML near byte {}: {e}", xml.buffer_position()))?;
-        match event {
-            Event::Start(ref e) | Event::Empty(ref e) => {
-                let is_empty = matches!(event, Event::Empty(_));
-                let name = e.name().as_ref().to_vec();
-                let depth = path_stack.len() + 1;
-                if depth == 1 {
-                    if name != b"components" {
-                        return Err("not an AppStream catalog".to_string());
-                    }
-                    saw_root = true;
-                }
-                if depth == 2 && name == b"component" {
-                    component = Some(Component {
-                        kind: attribute(e, b"type").unwrap_or_default(),
-                        ..Component::default()
-                    });
-                } else if depth == 3 && component.is_some() && !is_empty {
-                    let tagged = attribute(e, b"xml:lang").is_some();
-                    field = match name.as_slice() {
-                        b"id" => Some(Field::Id),
-                        b"name" if !tagged => Some(Field::Name),
-                        b"summary" if !tagged => Some(Field::Summary),
-                        b"url" if attribute(e, b"type").as_deref() == Some("homepage") => {
-                            Some(Field::Homepage)
-                        }
-                        b"bundle" if attribute(e, b"type").as_deref() != Some("appdata") => {
-                            Some(Field::Bundle)
-                        }
-                        _ => None,
-                    };
-                    text.clear();
-                } else if depth == 4
-                    && name == b"release"
-                    && path_stack.get(2).is_some_and(|p| p == b"releases")
-                    && let Some(c) = component.as_mut()
-                    && let Some(version) = attribute(e, b"version")
-                    // A development release is a pre-release, never what the app is at.
-                    && attribute(e, b"type").as_deref() != Some("development")
-                {
-                    let timestamp = attribute(e, b"timestamp")
-                        .and_then(|t| t.parse().ok())
-                        .unwrap_or(0);
-                    c.releases.push((timestamp, version));
-                }
-                if !is_empty {
-                    path_stack.push(name);
-                }
-            }
-            Event::Text(ref t) => {
-                if field.is_some() && path_stack.len() == 3 {
-                    text.push_str(&t.decode().map_err(|e| e.to_string())?);
-                }
-            }
-            Event::CData(ref c) => {
-                if field.is_some() && path_stack.len() == 3 {
-                    text.push_str(&c.decode().map_err(|e| e.to_string())?);
-                }
-            }
-            Event::GeneralRef(ref r) => {
-                if field.is_some() && path_stack.len() == 3 {
-                    if let Some(c) = r.resolve_char_ref().map_err(|e| e.to_string())? {
-                        text.push(c);
-                    } else {
-                        match r.decode().map_err(|e| e.to_string())?.as_ref() {
-                            "amp" => text.push('&'),
-                            "lt" => text.push('<'),
-                            "gt" => text.push('>'),
-                            "quot" => text.push('"'),
-                            "apos" => text.push('\''),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Event::End(ref e) => {
-                let depth = path_stack.len();
-                if depth == 3
-                    && let (Some(f), Some(c)) = (field.take(), component.as_mut())
-                {
-                    let value = text.trim().to_string();
-                    match f {
-                        Field::Id => c.id = value,
-                        Field::Name => c.name = Some(value),
-                        Field::Summary => c.summary = Some(value),
-                        Field::Homepage => c.homepage = Some(value),
-                        Field::Bundle => c.bundle = Some(value),
-                    }
-                } else if depth == 2
-                    && e.name().as_ref() == b"component"
-                    && let Some(c) = component.take()
-                    && let Some(entry) = finish(c, remote)
-                {
-                    collector.insert(entry);
-                }
-                path_stack.pop();
-            }
-            Event::Eof => {
-                // An empty or non-XML file must not look like a catalog with no apps.
-                if !saw_root {
-                    return Err("not an AppStream catalog (no <components> element)".to_string());
-                }
-                if !path_stack.is_empty() {
-                    return Err("unexpected end of file".to_string());
-                }
-                return Ok(());
-            }
-            _ => {}
-        }
-        buf.clear();
-    }
-}
-
 /// Builds a package from a finished `<component>`, or `None` if it is not an application.
-fn finish(c: Component, remote: &str) -> Option<Entry> {
+fn finish(c: Component, remote: &str, active: &Path) -> Option<Entry> {
     // `desktop` is the legacy AppStream spelling of `desktop-application`; Flathub still
     // ships org.mozilla.firefox and 18 other apps with it.
     let is_app = matches!(
@@ -475,9 +305,18 @@ fn finish(c: Component, remote: &str) -> Option<Entry> {
         .or_else(|| branch.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let stable = branch.as_deref() == Some("stable");
+    // The cached 128 px icon, when its file is really on disk.
+    let icon = c
+        .icons
+        .iter()
+        .find(|i| i.kind == "cached" && i.width == Some(128))
+        .map(|i| active.join("icons/128x128").join(&i.value))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned());
     Some(Entry {
         package: Package {
             source: SourceId::new(SOURCE),
+            app_id: Some(c.id.clone()),
             name: c.id,
             version,
             installed_version: None,
@@ -487,9 +326,8 @@ fn finish(c: Component, remote: &str) -> Option<Entry> {
             url: c.homepage,
             download_size: 0,
             installed_size: 0,
-            app_id: None,
-            categories: Vec::new(),
-            icon: None,
+            categories: c.categories,
+            icon,
             popularity: None,
             upgradable: false,
         },

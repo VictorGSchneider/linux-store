@@ -4567,6 +4567,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "store-appstream"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "quick-xml",
+ "tempfile",
+]
+
+[[package]]
 name = "store-backend-aur"
 version = "0.1.0"
 dependencies = [
@@ -4583,7 +4592,7 @@ name = "store-backend-flatpak"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "quick-xml",
+ "store-appstream",
  "store-core",
  "tempfile",
 ]
