@@ -7,7 +7,7 @@ description = "Read-only AUR backend for linux-store, from the official metadata
 
 [dependencies]
 store-core = { path = "../../core" }
-ureq = "3.5.2"
+ureq = { version = "3.5.2", features = ["platform-verifier"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 flate2 = "1.1.11"

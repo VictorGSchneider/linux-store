@@ -31,8 +31,15 @@ enum Command {
     Search {
         #[arg(required = true)]
         query: Vec<String>,
+        /// How many results to show for each source
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// One package per line with its description, instead of a column per source
+        #[arg(long)]
+        plain: bool,
+        /// Total width of the columns (default: the terminal's width, else 100)
+        #[arg(long)]
+        width: Option<usize>,
     },
     /// List installed packages.
     Installed,
@@ -111,7 +118,7 @@ fn format_package(p: &Package) -> String {
 /// Runs the CLI. `args` is the full argv (program name first). `make_store` builds the store
 /// from the resolved index path. Returns the process exit code.
 pub fn run<W: Write, E: Write>(
-    args: &[String],
+    args: &[OsString],
     make_store: impl FnOnce(&Path) -> store_core::Result<Store>,
     installer: &dyn Installer,
     out: &mut W,
@@ -183,7 +190,19 @@ pub fn run<W: Write, E: Write>(
                     Outcome::Updated { packages } => {
                         writeln!(out, "{}: {packages} packages", s.source)
                     }
-                    Outcome::Unavailable => writeln!(out, "{}: unavailable", s.source),
+                    Outcome::Unavailable { reason: None } => {
+                        writeln!(out, "{}: unavailable", s.source)
+                    }
+                    Outcome::Unavailable {
+                        reason: Some(reason),
+                    } => {
+                        writeln!(
+                            out,
+                            "{}: unavailable ({})",
+                            s.source,
+                            printable_block(reason)
+                        )
+                    }
                     Outcome::Failed(message) => {
                         writeln!(out, "{}: failed: {}", s.source, printable_block(message))
                     }
@@ -196,9 +215,28 @@ pub fn run<W: Write, E: Write>(
                     .all(|s| matches!(s.outcome, Outcome::Failed(_)));
             i32::from(all_failed)
         }
-        Command::Search { query, limit } => {
-            print_packages(store.search(&query.join(" "), limit), out, err)
-        }
+        Command::Search {
+            query,
+            limit,
+            plain: true,
+            ..
+        } => print_packages(store.search(&query.join(" "), limit), out, err),
+        Command::Search {
+            query,
+            limit,
+            plain: false,
+            width,
+        } => match store.search_by_source(&query.join(" "), limit) {
+            Ok(groups) => {
+                let width = width.unwrap_or_else(terminal_width);
+                let _ = write!(out, "{}", render_columns(&groups, width));
+                0
+            }
+            Err(e) => {
+                let _ = writeln!(err, "store: {}", printable_block(&e.to_string()));
+                1
+            }
+        },
         Command::Installed => print_packages(store.installed(), out, err),
         Command::Install { .. } | Command::Remove { .. } | Command::Upgrade => {
             unreachable!("handled before the index is opened")
@@ -355,6 +393,75 @@ fn run_installer<W: Write, E: Write>(
             1
         }
     }
+}
+
+fn terminal_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(width, _)| usize::from(width.0))
+        .filter(|w| *w >= 20)
+        .unwrap_or(100)
+}
+
+/// Shortens `text` to `width` characters, ending in `…` when something was cut.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// One column per source, side by side: a header, a rule, then `name version` for each package
+/// (`✓` marks an installed one). No line is wider than `width`.
+fn render_columns(groups: &[(store_core::SourceId, Vec<Package>)], width: usize) -> String {
+    const GAP: &str = "  ";
+    if groups.is_empty() {
+        return String::new();
+    }
+    let gaps = GAP.chars().count() * (groups.len() - 1);
+    let column = (width.saturating_sub(gaps) / groups.len()).max(8);
+    let rows = groups
+        .iter()
+        .map(|(_, found)| found.len())
+        .max()
+        .unwrap_or(0);
+    let cell = |text: &str| format!("{:<column$}", fit(text, column));
+    let mut lines = Vec::with_capacity(rows + 2);
+    let header = |g: &(store_core::SourceId, Vec<Package>)| {
+        cell(&printable(&format!("{} ({})", g.0, g.1.len())))
+    };
+    lines.push(groups.iter().map(header).collect::<Vec<_>>().join(GAP));
+    lines.push(
+        groups
+            .iter()
+            .map(|_| "─".repeat(column))
+            .collect::<Vec<_>>()
+            .join(GAP),
+    );
+    for row in 0..rows {
+        let cells: Vec<String> = groups
+            .iter()
+            .map(|(_, found)| match found.get(row) {
+                Some(p) => {
+                    let mark = if p.is_installed() { " ✓" } else { "" };
+                    let tail = format!(" {}{mark}", printable(&p.version));
+                    // Keep the version visible: shorten the name first.
+                    let name_room = column.saturating_sub(tail.chars().count()).max(4);
+                    cell(&format!("{}{}", fit(&printable(&p.name), name_room), tail))
+                }
+                None => cell(""),
+            })
+            .collect();
+        lines.push(cells.join(GAP));
+    }
+    let mut text = lines
+        .iter()
+        .map(|l| l.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text
 }
 
 fn print_packages<W: Write, E: Write>(

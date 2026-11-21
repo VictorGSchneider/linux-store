@@ -75,7 +75,11 @@ impl Backend for PacmanBackend {
     }
 
     fn is_available(&self) -> bool {
-        self.open().is_ok()
+        self.unavailable_reason().is_none()
+    }
+
+    fn unavailable_reason(&self) -> Option<String> {
+        self.open().err()
     }
 
     fn packages(&self) -> Result<Vec<Package>> {

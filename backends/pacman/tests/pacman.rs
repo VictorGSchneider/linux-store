@@ -95,3 +95,14 @@ fn real_system_smoke() {
     let packages = PacmanBackend::from_system().packages().unwrap();
     assert!(packages.len() > 1000, "only {} packages", packages.len());
 }
+
+#[test]
+fn an_unavailable_backend_says_why() {
+    let nowhere = std::path::Path::new("/nonexistent/linux-store-test");
+    let backend = PacmanBackend::with_paths(nowhere, &nowhere.join("db"), &["core"]);
+    let reason = backend.unavailable_reason().expect("a reason");
+    assert!(!reason.is_empty());
+    let fx = fixture::build();
+    let working = PacmanBackend::with_paths(&fx.root().join("root"), &fx.db_path(), &["core"]);
+    assert_eq!(working.unavailable_reason(), None);
+}

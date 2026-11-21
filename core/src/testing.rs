@@ -21,6 +21,7 @@ pub struct FakeBackend {
     source: SourceId,
     packages: Vec<Package>,
     available: bool,
+    reason: Option<String>,
     failure: Option<String>,
 }
 
@@ -30,12 +31,19 @@ impl FakeBackend {
             source: SourceId::new(source),
             packages,
             available: true,
+            reason: None,
             failure: None,
         }
     }
 
     pub fn unavailable(mut self) -> FakeBackend {
         self.available = false;
+        self
+    }
+
+    pub fn unavailable_because(mut self, reason: &str) -> FakeBackend {
+        self.available = false;
+        self.reason = Some(reason.into());
         self
     }
 
@@ -52,6 +60,10 @@ impl Backend for FakeBackend {
 
     fn is_available(&self) -> bool {
         self.available
+    }
+
+    fn unavailable_reason(&self) -> Option<String> {
+        self.reason.clone()
     }
 
     fn packages(&self) -> Result<Vec<Package>> {

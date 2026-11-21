@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use flate2::{Compression, write::GzEncoder};
-use store_backend_flatpak::{FlatpakBackend, user_installation_dir};
+use store_backend_flatpak::{FlatpakBackend, installation_dirs, user_installation_dir};
 use store_core::{Backend, Error, Package, SourceId};
 
 const ARCH: &str = "x86_64";
@@ -373,4 +373,97 @@ fn user_installation_honours_xdg_data_home() {
         Some(PathBuf::from("/home/u/.local/share/flatpak"))
     );
     assert_eq!(path(None, None), None);
+}
+
+#[test]
+fn development_releases_are_not_the_version() {
+    let releases = r#"<releases>
+        <release version="48.beta" timestamp="900" type="development"/>
+        <release version="47.1" timestamp="800" type="stable"/>
+        <release version="47.0" timestamp="700"/></releases>"#;
+    let (_dir, packages) = load(&catalog(&[app(
+        "org.example.App",
+        "App",
+        releases,
+        "stable",
+    )]));
+    assert_eq!(find(&packages, "org.example.App").version, "47.1");
+}
+
+#[test]
+fn an_app_with_only_development_releases_falls_back_to_the_branch() {
+    let releases =
+        r#"<releases><release version="1.0-rc1" timestamp="9" type="development"/></releases>"#;
+    let (_dir, packages) = load(&catalog(&[app(
+        "org.example.App",
+        "App",
+        releases,
+        "stable",
+    )]));
+    assert_eq!(find(&packages, "org.example.App").version, "stable");
+}
+
+#[test]
+fn cdata_text_is_kept_as_written() {
+    let xml = catalog(&[
+        "<component type=\"desktop-application\"><id>org.example.C</id>\
+        <name><![CDATA[Tom & Jerry]]></name>\
+        <summary>Fun <![CDATA[<b>and</b>]]> games</summary></component>"
+            .to_string(),
+    ]);
+    let (_dir, packages) = load(&xml);
+    let package = find(&packages, "org.example.C");
+    assert_eq!(package.title.as_deref(), Some("Tom & Jerry"));
+    assert_eq!(package.description.as_deref(), Some("Fun <b>and</b> games"));
+}
+
+#[test]
+fn entities_in_attributes_are_decoded() {
+    let releases = r#"<releases><release version="1&amp;2" timestamp="1"/></releases>"#;
+    let (_dir, packages) = load(&catalog(&[app(
+        "org.example.App",
+        "App",
+        releases,
+        "stable",
+    )]));
+    assert_eq!(find(&packages, "org.example.App").version, "1&2");
+}
+
+#[test]
+fn environment_and_config_files_decide_the_installations() {
+    use std::ffi::OsString;
+    let config = tempfile::tempdir().unwrap();
+    let conf = config.path().join("installations.d");
+    fs::create_dir_all(&conf).unwrap();
+    fs::write(
+        conf.join("games.conf"),
+        "# an extra installation\n[Installation \"games\"]\nPath=/mnt/games/flatpak\nDisplayName=Games\n",
+    )
+    .unwrap();
+    fs::write(conf.join("notes.txt"), "Path=/not/a/conf/file\n").unwrap();
+    let dirs = |system: Option<&str>, user: Option<&str>| {
+        installation_dirs(
+            system.map(OsString::from),
+            user.map(OsString::from),
+            None,
+            Some(OsString::from("/home/u")),
+            config.path(),
+        )
+    };
+    assert_eq!(
+        dirs(None, None),
+        [
+            PathBuf::from("/var/lib/flatpak"),
+            PathBuf::from("/home/u/.local/share/flatpak"),
+            PathBuf::from("/mnt/games/flatpak"),
+        ]
+    );
+    assert_eq!(
+        dirs(Some("/srv/system"), Some("/srv/user")),
+        [
+            PathBuf::from("/srv/system"),
+            PathBuf::from("/srv/user"),
+            PathBuf::from("/mnt/games/flatpak"),
+        ]
+    );
 }

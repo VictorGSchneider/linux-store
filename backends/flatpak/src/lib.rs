@@ -22,13 +22,17 @@ impl FlatpakBackend {
     /// The system installation (`/var/lib/flatpak`) and the user one
     /// (`$XDG_DATA_HOME/flatpak`, else `~/.local/share/flatpak`).
     pub fn from_system() -> FlatpakBackend {
-        let mut installations = vec![PathBuf::from("/var/lib/flatpak")];
-        installations.extend(user_installation_dir(
-            std::env::var_os("XDG_DATA_HOME"),
-            std::env::var_os("HOME"),
-        ));
+        let config = std::env::var_os("FLATPAK_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| PathBuf::from("/etc/flatpak"), PathBuf::from);
         FlatpakBackend {
-            installations,
+            installations: installation_dirs(
+                std::env::var_os("FLATPAK_SYSTEM_DIR"),
+                std::env::var_os("FLATPAK_USER_DIR"),
+                std::env::var_os("XDG_DATA_HOME"),
+                std::env::var_os("HOME"),
+                &config,
+            ),
             arch: flatpak_arch(),
         }
     }
@@ -106,6 +110,52 @@ impl FlatpakBackend {
         }
         installed
     }
+}
+
+/// Every installation Flatpak would use: the system one (`/var/lib/flatpak`, or
+/// `FLATPAK_SYSTEM_DIR`), the user one (see [`user_installation_dir`], or `FLATPAK_USER_DIR`),
+/// and the extra system-wide ones declared in `<config_dir>/installations.d/*.conf`
+/// (`/etc/flatpak/installations.d`), each by its `Path=`.
+pub fn installation_dirs(
+    flatpak_system_dir: Option<OsString>,
+    flatpak_user_dir: Option<OsString>,
+    xdg_data_home: Option<OsString>,
+    home: Option<OsString>,
+    config_dir: &Path,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        flatpak_system_dir
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| PathBuf::from("/var/lib/flatpak"), PathBuf::from),
+    ];
+    dirs.extend(
+        flatpak_user_dir
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| user_installation_dir(xdg_data_home, home)),
+    );
+    let mut confs: Vec<PathBuf> = std::fs::read_dir(config_dir.join("installations.d"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "conf"))
+        .collect();
+    confs.sort();
+    for conf in confs {
+        let Ok(text) = std::fs::read_to_string(&conf) else {
+            continue;
+        };
+        for line in text.lines() {
+            if let Some(path) = line.trim().strip_prefix("Path=") {
+                let path = PathBuf::from(path.trim());
+                if path.is_absolute() && !dirs.contains(&path) {
+                    dirs.push(path);
+                }
+            }
+        }
+    }
+    dirs
 }
 
 /// Where Flatpak keeps the per-user installation.
@@ -244,7 +294,12 @@ fn attribute(e: &BytesStart, key: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        .map(
+            |a| match a.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
+                Ok(value) => value.into_owned(),
+                Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
+            },
+        )
 }
 
 fn open(path: &Path) -> std::result::Result<Box<dyn Read>, String> {
@@ -309,6 +364,8 @@ fn parse_catalog(
                     && path_stack.get(2).is_some_and(|p| p == b"releases")
                     && let Some(c) = component.as_mut()
                     && let Some(version) = attribute(e, b"version")
+                    // A development release is a pre-release, never what the app is at.
+                    && attribute(e, b"type").as_deref() != Some("development")
                 {
                     let timestamp = attribute(e, b"timestamp")
                         .and_then(|t| t.parse().ok())
@@ -322,6 +379,11 @@ fn parse_catalog(
             Event::Text(ref t) => {
                 if field.is_some() && path_stack.len() == 3 {
                     text.push_str(&t.decode().map_err(|e| e.to_string())?);
+                }
+            }
+            Event::CData(ref c) => {
+                if field.is_some() && path_stack.len() == 3 {
+                    text.push_str(&c.decode().map_err(|e| e.to_string())?);
                 }
             }
             Event::GeneralRef(ref r) => {

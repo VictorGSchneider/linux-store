@@ -7,7 +7,8 @@ use store_core::{Backend, Index, Store};
 use store_installer_pkexec::PkexecInstaller;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    // args_os: an argument that is not valid UTF-8 must be a usage error, not a panic.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let code = store_cli::run(
         &args,
         |path| {

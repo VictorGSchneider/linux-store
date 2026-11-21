@@ -94,6 +94,28 @@ fn truncated_gzip_is_an_error() {
 }
 
 #[test]
+fn a_corrupted_gzip_checksum_is_an_error() {
+    // The JSON array is complete, so only the gzip trailer (CRC32 first) can tell it is damaged.
+    let mut bytes = gz(FIXTURE);
+    let crc = bytes.len() - 8;
+    bytes[crc] ^= 0xff;
+    let (_dir, backend) = backend_for(&bytes);
+    backend_error(backend.packages());
+}
+
+#[test]
+fn data_after_the_json_array_is_an_error() {
+    let (_dir, backend) = backend_for(&gz(&format!("{FIXTURE} garbage")));
+    backend_error(backend.packages());
+}
+
+#[test]
+fn trailing_whitespace_after_the_array_is_fine() {
+    let (_dir, backend) = backend_for(&gz(&format!("{FIXTURE}\n\n")));
+    assert_eq!(backend.packages().unwrap().len(), 2);
+}
+
+#[test]
 fn garbled_json_is_an_error() {
     let (_dir, backend) = backend_for(&gz("this is not json"));
     backend_error(backend.packages());
