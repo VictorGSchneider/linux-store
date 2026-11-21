@@ -22,6 +22,7 @@ const SCHEMA: &str = "
         UNIQUE (source, name)
     );
     CREATE INDEX IF NOT EXISTS packages_name_lower ON packages (lower(name));
+    CREATE INDEX IF NOT EXISTS packages_title_lower ON packages (lower(title));
     CREATE VIRTUAL TABLE IF NOT EXISTS packages_fts
         USING fts5(name, title, description, tokenize = 'unicode61');
 ";
@@ -51,7 +52,7 @@ impl Index {
     /// a cache). Opening an up-to-date index must not write, otherwise a reader (a search)
     /// would wait for any concurrent refresh.
     fn init(conn: Connection) -> Result<Index> {
-        let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let found = user_version(&conn)?;
         if found > SCHEMA_VERSION {
             return Err(Error::UnsupportedIndexVersion {
                 found,
@@ -59,12 +60,9 @@ impl Index {
             });
         }
         if found != SCHEMA_VERSION {
-            // Older schema: drop it; the next refresh refills the cache.
-            conn.execute_batch(
-                "DROP TABLE IF EXISTS packages_fts; DROP TABLE IF EXISTS packages;",
-            )?;
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            migrate(&conn)?;
+        } else {
+            ensure_lookup_indexes(&conn)?;
         }
         Ok(Index { conn })
     }
@@ -182,8 +180,10 @@ impl Index {
             "SELECT {columns} FROM packages_fts \
              JOIN packages p ON p.id = packages_fts.rowid \
              WHERE packages_fts MATCH ?1 \
-             ORDER BY (lower(p.name) = lower(?2) OR lower(coalesce(p.title, '')) = lower(?2)) DESC, \
-                      substr(lower(p.name), 1, length(?2)) = lower(?2) DESC, \
+             ORDER BY (lower(p.name) = lower(?2) OR lower(p.name) = ?4 \
+                       OR lower(coalesce(p.title, '')) = lower(?2)) DESC, \
+                      (substr(lower(p.name), 1, length(?2)) = lower(?2) \
+                       OR substr(lower(p.name), 1, length(?4)) = ?4) DESC, \
                       bm25(packages_fts, 10.0, 10.0, 1.0), length(p.name), p.name \
              LIMIT ?3"
         );
@@ -192,22 +192,27 @@ impl Index {
             params![
                 fts_query,
                 query.trim(),
-                i64::try_from(limit).unwrap_or(i64::MAX)
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                // "firefox developer edition" is the package firefox-developer-edition
+                terms.join("-").to_lowercase(),
             ],
             row_to_package,
         )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Packages whose lowercased name starts with `prefix` (ASCII, lowercase, non-empty):
-    /// the exact name first, then shorter names, then by name.
+    /// Packages whose lowercased name or title starts with `prefix` (ASCII, lowercase, non-empty):
+    /// an exact name or title first, then shorter names, then by name.
     fn search_name_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Package>> {
         let mut upper = prefix.to_string();
         let last = upper.pop().expect("prefix is not empty");
         upper.push(char::from(last as u8 + 1));
         let sql = format!(
-            "SELECT {COLUMNS} FROM packages WHERE lower(name) >= ?1 AND lower(name) < ?2 \
-             ORDER BY lower(name) = ?1 DESC, length(name), name, source LIMIT ?3"
+            "SELECT {COLUMNS} FROM packages \
+             WHERE (lower(name) >= ?1 AND lower(name) < ?2) \
+                OR (lower(title) >= ?1 AND lower(title) < ?2) \
+             ORDER BY (lower(name) = ?1 OR lower(title) = ?1) DESC, length(name), name, source \
+             LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
@@ -223,6 +228,64 @@ impl Index {
             .query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+}
+
+fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+}
+
+/// Rebuilds the schema in one transaction. The version is read again once the write lock is held,
+/// so several processes opening an old index at the same time neither fail nor drop each other's
+/// freshly created tables: the first migrates, the others see the new version and do nothing.
+fn migrate(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = (|| -> Result<()> {
+        let found = user_version(conn)?;
+        if found > SCHEMA_VERSION {
+            return Err(Error::UnsupportedIndexVersion {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if found != SCHEMA_VERSION {
+            // Older schema: drop it; the next refresh refills the cache.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS packages_fts; DROP TABLE IF EXISTS packages;",
+            )?;
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => Ok(conn.execute_batch("COMMIT")?),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+const LOOKUP_INDEXES: [&str; 2] = ["packages_name_lower", "packages_title_lower"];
+
+/// An index written before the lookup indexes existed still works but answers short queries
+/// slowly. Creating them is a one-time write, done only when one is missing.
+fn ensure_lookup_indexes(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN (?1, ?2)",
+        params![LOOKUP_INDEXES[0], LOOKUP_INDEXES[1]],
+        |r| r.get(0),
+    )?;
+    if present as usize == LOOKUP_INDEXES.len() {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE INDEX IF NOT EXISTS packages_name_lower ON packages (lower(name));
+         CREATE INDEX IF NOT EXISTS packages_title_lower ON packages (lower(title));
+         COMMIT;",
+    )?;
+    Ok(())
 }
 
 fn to_sql_size(n: u64) -> i64 {
@@ -667,5 +730,106 @@ mod tests {
             idx.search("firefox", 10).unwrap()[0].name,
             "org.mozilla.firefox"
         );
+    }
+
+    #[test]
+    fn separators_in_the_query_still_count_as_an_exact_name() {
+        // bm25 alone would prefer the short competitor: the real package has a long description.
+        let long = vec!["word"; 60].join(" ");
+        let idx = indexed(&[
+            pkg(
+                "a",
+                "edition-firefox-developer",
+                "firefox developer edition",
+            ),
+            pkg("a", "firefox-developer-edition", &long),
+        ]);
+        assert_eq!(
+            idx.search("firefox developer edition", 10).unwrap()[0].name,
+            "firefox-developer-edition"
+        );
+    }
+
+    #[test]
+    fn one_and_two_letter_queries_match_title_prefixes() {
+        let idx = indexed(&[
+            Package {
+                title: Some("Qt Creator".into()),
+                ..pkg("a", "org.qt.creator", "an IDE")
+            },
+            Package {
+                title: Some("VLC media player".into()),
+                ..pkg("a", "org.videolan.VLC", "player")
+            },
+            pkg("a", "unrelated", "nothing"),
+        ]);
+        assert_eq!(names(idx.search("qt", 10).unwrap()), ["org.qt.creator"]);
+        assert_eq!(names(idx.search("vl", 10).unwrap()), ["org.videolan.VLC"]);
+    }
+
+    fn index_names(path: &std::path::Path) -> Vec<String> {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'packages_%_lower'")
+            .unwrap();
+        let mut found: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_current_index_missing_its_lookup_indexes_gets_them_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        drop(Index::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("DROP INDEX packages_name_lower;")
+                .unwrap();
+            conn.execute_batch("DROP INDEX IF EXISTS packages_title_lower;")
+                .unwrap();
+        }
+        assert!(index_names(&path).is_empty());
+        drop(Index::open(&path).unwrap());
+        assert_eq!(
+            index_names(&path),
+            ["packages_name_lower", "packages_title_lower"]
+        );
+    }
+
+    #[test]
+    fn concurrent_opens_of_an_old_index_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE packages (id INTEGER PRIMARY KEY, source TEXT NOT NULL,
+                     name TEXT NOT NULL, version TEXT NOT NULL, installed_version TEXT,
+                     description TEXT, repo TEXT, url TEXT, download_size INTEGER NOT NULL,
+                     installed_size INTEGER NOT NULL, UNIQUE (source, name));
+                 CREATE VIRTUAL TABLE packages_fts USING fts5(name, description);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || Index::open(&path).map(|i| i.count().unwrap()))
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().expect("every open must succeed"), 0);
+        }
+        let version: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 }

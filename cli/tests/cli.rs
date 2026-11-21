@@ -8,9 +8,9 @@ use store_protocol::{Change, ChangeKind, ErrorCode, Event, Operation, Request, S
 
 /// Runs the CLI against `db` with one fake backend; returns (exit code, stdout, stderr).
 fn run_cli(args: &[&str], backend: FakeBackend) -> (i32, String, String) {
-    let argv: Vec<String> = std::iter::once("store")
+    let argv: Vec<OsString> = std::iter::once("store")
         .chain(args.iter().copied())
-        .map(String::from)
+        .map(OsString::from)
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let installer = FakeInstaller::new(vec![], Ok(()));
@@ -158,9 +158,9 @@ fn search_shows_title_before_description() {
 #[test]
 fn refresh_reports_every_source() {
     let dir = tempfile::tempdir().unwrap();
-    let argv: Vec<String> = ["store", "--db", &db(&dir), "refresh"]
+    let argv: Vec<OsString> = ["store", "--db", &db(&dir), "refresh"]
         .iter()
-        .map(|s| s.to_string())
+        .map(OsString::from)
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let installer = FakeInstaller::new(vec![], Ok(()));
@@ -187,9 +187,9 @@ fn refresh_reports_every_source() {
 
 /// Runs an install/remove/upgrade command against a fake installer; no index is involved.
 fn run_installer(args: &[&str], installer: &FakeInstaller) -> (i32, String, String) {
-    let argv: Vec<String> = std::iter::once("store")
+    let argv: Vec<OsString> = std::iter::once("store")
         .chain(args.iter().copied())
-        .map(String::from)
+        .map(OsString::from)
         .collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(
@@ -419,4 +419,42 @@ fn remove_progress_is_summarised() {
     assert!(lines <= 12, "{lines} lines:\n{out}");
     assert!(out.contains("[remove] cowsay 100%"), "{out}");
     assert!(out.contains("[remove] cowsay 0%"), "{out}");
+}
+
+#[test]
+fn a_non_utf8_argument_is_a_usage_error_not_a_panic() {
+    use std::os::unix::ffi::OsStringExt;
+    let argv = vec![
+        OsString::from("store"),
+        OsString::from("search"),
+        OsString::from_vec(vec![0xff, 0xfe, b'x']),
+    ];
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let installer = FakeInstaller::new(vec![], Ok(()));
+    let code = run(
+        &argv,
+        |_| panic!("no index needed"),
+        &installer,
+        &mut out,
+        &mut err,
+    );
+    assert_ne!(code, 0);
+    assert!(
+        !err.is_empty() || !out.is_empty(),
+        "the user must be told what was wrong"
+    );
+}
+
+#[test]
+fn an_unavailable_source_shows_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out, _) = run_cli(
+        &["--db", &db(&dir), "refresh"],
+        fake().unavailable_because("no catalog found"),
+    );
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("fake: unavailable (no catalog found)"),
+        "{out}"
+    );
 }

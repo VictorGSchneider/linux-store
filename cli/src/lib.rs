@@ -111,7 +111,7 @@ fn format_package(p: &Package) -> String {
 /// Runs the CLI. `args` is the full argv (program name first). `make_store` builds the store
 /// from the resolved index path. Returns the process exit code.
 pub fn run<W: Write, E: Write>(
-    args: &[String],
+    args: &[OsString],
     make_store: impl FnOnce(&Path) -> store_core::Result<Store>,
     installer: &dyn Installer,
     out: &mut W,
@@ -183,7 +183,19 @@ pub fn run<W: Write, E: Write>(
                     Outcome::Updated { packages } => {
                         writeln!(out, "{}: {packages} packages", s.source)
                     }
-                    Outcome::Unavailable => writeln!(out, "{}: unavailable", s.source),
+                    Outcome::Unavailable { reason: None } => {
+                        writeln!(out, "{}: unavailable", s.source)
+                    }
+                    Outcome::Unavailable {
+                        reason: Some(reason),
+                    } => {
+                        writeln!(
+                            out,
+                            "{}: unavailable ({})",
+                            s.source,
+                            printable_block(reason)
+                        )
+                    }
                     Outcome::Failed(message) => {
                         writeln!(out, "{}: failed: {}", s.source, printable_block(message))
                     }
