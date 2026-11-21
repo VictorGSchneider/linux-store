@@ -1,3 +1,4 @@
+mod app;
 mod backend;
 mod error;
 mod host;
@@ -8,6 +9,7 @@ mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use app::{App, assemble};
 pub use backend::Backend;
 pub use error::{Error, Result};
 pub use host::Host;
