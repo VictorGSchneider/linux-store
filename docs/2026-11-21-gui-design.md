@@ -58,6 +58,7 @@ O `core`, os três backends (pacman, AUR, Flatpak) e o helper privilegiado exist
 
 - `Package` ganha `app_id: Option<String>`, `categories: Vec<String>`, `icon: Option<String>` (caminho local ou nome do ícone) e `popularity: Option<f64>`.
 - O esquema do índice sobe para a versão 3 com as colunas novas e um índice em `app_id`.
+- **Tabela de correspondências** `app_links (source, name, app_key)` no índice (decisão do usuário, 2026-11-21): é uma função pura de `packages`, refeita dentro da transação de cada `replace_source`, e guarda a chave do app de cada pacote pelas regras abaixo. Ligações curadas ou do Repology poderão alimentá-la depois, sem mexer no `Catalog` nem na GUI.
 - Novo tipo `App`: um nome de exibição, o `app_id` e a lista de variantes (`Package` por fonte) **já ordenada pela ordem do host**. O core oferece `Store::apps(query, limit)`, `Store::apps_in_source(...)` e `Store::app(id)`.
 - Regra de agrupamento, em ordem: (1) mesmo `app_id` vindo do AppStream (componente do pacman com `<pkgname>`; id do Flatpak); (2) nome idêntico (normalizado em minúsculas). Nada além disso. O AUR só junta por nome idêntico (`firefox-bin` fica separado).
 - A ordem das fontes é uma função do core: nativa do host, flatpak, depois a lista fixa. A fonte nativa vem de `/etc/os-release`.

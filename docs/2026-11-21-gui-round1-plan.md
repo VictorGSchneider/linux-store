@@ -18,7 +18,7 @@
 - Interface em inglês, todo texto visível em `@tr()`.
 - Rodada 1 **não tem**: categorias, barra lateral, Settings, cartão duplo, `store-metadata`, capturas de tela, instalador de Flatpak/AUR.
 - Chips: só fontes com pacotes no índice. Ordem de fontes: nativa do host, flatpak, depois `pacman, aur, snap, appimage`, o resto por nome.
-- Juntar apps só por `app_id` do AppStream ou nome idêntico (minúsculas); um app tem no máximo uma variante por fonte.
+- Juntar apps só por `app_id` do AppStream ou nome idêntico (minúsculas); um app tem no máximo uma variante por fonte. A correspondência vive na tabela `app_links` do índice, que é uma função pura de `packages` e se refaz sozinha a cada `replace_source`.
 - Ícones: 64×64 nos cartões, 128×128 na página do app, decodificados em memória (PNG e JXL), cache LRU, sem arquivos convertidos.
 - Dependências novas com `cargo add` e `Cargo.lock` versionado (o CI usa `--locked`).
 - Antes de cada push: `cargo fmt --all --check`; `cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings`; `cargo test --workspace --exclude linux-store --features store-core/testing`; `cargo check -p linux-store`.
@@ -27,8 +27,8 @@
 
 Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma tem o teste na tarefa dona.
 
-1. Dois pacotes da **mesma fonte** com o mesmo `app_id` não viram um app só (o botão instalaria o pacote errado). Tarefa 6.
-2. `firefox-bin` do AUR não junta com `firefox`; `Firefox` e `firefox` (caixa) juntam. Tarefa 6.
+1. Dois pacotes da **mesma fonte** com o mesmo `app_id` não viram um app só (o botão instalaria o pacote errado). Tarefa 7.
+2. `firefox-bin` do AUR não junta com `firefox`; `Firefox` e `firefox` (caixa) juntam; as ligações se corrigem quando outra fonte chega depois. Tarefa 7.
 3. Ícone ausente, truncado ou de formato desconhecido: o cartão cai para texto, sem pânico. Tarefa 11.
 4. `/etc/os-release` ausente, ilegível ou com `ID` desconhecido: sem fonte nativa, e a ordem continua determinística. Tarefa 2.
 5. Senha cancelada (`InstallError::Dismissed`), erro do helper ou cancelamento: a UI volta ao estado ocioso com mensagem, nunca fica em "installing". Tarefas 12 e 15.
@@ -37,9 +37,9 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 ## Estrutura de arquivos
 
 - `core/src/package.rs` (modificar): campos novos.
-- `core/src/index.rs` (modificar): esquema v3 e consultas novas.
+- `core/src/index.rs` (modificar): esquema v3, tabela `app_links` e consultas novas.
 - `core/src/host.rs` (criar): `Host`, ordem de fontes.
-- `core/src/app.rs` (criar): `App`, `group`.
+- `core/src/app.rs` (criar): `App`, `assemble`.
 - `core/src/catalog.rs` (criar): `Catalog`, `Row`.
 - `core/src/store.rs` (modificar): refresh paralelo com progresso; ordem do host.
 - `appstream/` (criar, pacote `store-appstream`): parser AppStream extraído do Flatpak.
@@ -123,46 +123,53 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 - [ ] **Passo 4:** rode a suíte do workspace.
 - [ ] **Passo 5: commit** `aur: lê a popularidade do dump`.
 
-### Tarefa 6: `App` e agrupamento
+### Tarefa 6: `App` (montagem a partir de pacotes ligados)
 
 **Arquivos:** criar `core/src/app.rs`; modificar `core/src/lib.rs`; teste no mesmo arquivo.
 
 **Interfaces:**
-- Produz: `pub struct App { pub key: String, pub title: String, pub variants: Vec<Package> }`; `App::icon(&self) -> Option<&str>`; `App::description(&self) -> Option<&str>`; `App::is_installed(&self) -> bool`; `App::is_upgradable(&self) -> bool`; `App::variant(&self, source: &SourceId) -> Option<&Package>`; `pub fn group(packages: Vec<Package>, host: &Host) -> Vec<App>`.
-- Regras: `key` é o `app_id` de alguma variante, senão o nome em minúsculas. Um pacote sem `app_id` entra no app que já tem um pacote de **nome em minúsculas igual**; pacotes com `app_id` juntam por `app_id`. Um app tem **no máximo uma variante por fonte**: o segundo pacote da mesma fonte vira outro `App` (chave `<key>#<n>`). `title` é o primeiro `title` disponível, senão o nome da primeira variante. Variantes ordenadas por `Host::sort`; os apps saem na ordem do primeiro pacote de cada um (preserva o ranking da busca).
+- Produz: `pub struct App { pub key: String, pub title: String, pub variants: Vec<Package> }`; `App::icon(&self) -> Option<&str>`; `App::description(&self) -> Option<&str>`; `App::is_installed(&self) -> bool`; `App::is_upgradable(&self) -> bool`; `App::variant(&self, source: &SourceId) -> Option<&Package>`; `pub fn assemble(linked: Vec<(String, Package)>, host: &Host) -> Vec<App>`.
+- `assemble` recebe pares `(app_key, pacote)` (a chave vem da tabela `app_links`, Tarefa 7) e junta os que têm a mesma chave. Os apps saem na ordem do primeiro pacote de cada chave (preserva o ranking da busca); as variantes saem ordenadas por `Host::sort`; `title` é o primeiro `title` disponível, senão o nome da primeira variante.
 
-- [ ] **Passo 1: testes que falham**: `same_app_id_joins_pacman_and_flatpak`, `identical_name_joins_aur_with_pacman`, `name_match_ignores_case`, `aur_firefox_bin_does_not_join_firefox`, `two_packages_of_one_source_with_same_app_id_stay_separate` (pacman `foo` e `foo-extra`, ambos `app_id = org.x.Foo`, mais um flatpak `org.x.Foo`: saem **dois** apps, o flatpak em um deles, e nenhum com duas variantes pacman), `variants_follow_host_order`, `apps_follow_input_order`, `title_prefers_a_variant_with_title`.
+- [ ] **Passo 1: testes que falham**: `same_key_joins_variants`, `different_keys_stay_separate`, `apps_follow_input_order`, `variants_follow_host_order`, `title_prefers_a_variant_with_title`, `is_installed_and_upgradable_look_at_any_variant`.
 - [ ] **Passo 2:** rode `cargo test -p store-core --features testing app::` e veja falhar.
-- [ ] **Passo 3:** implemente `group` num único passe com dois mapas (`app_id -> índice`, `nome minúsculo -> índice`).
+- [ ] **Passo 3:** implemente `assemble` num único passe (mapa `chave -> índice`).
 - [ ] **Passo 4:** rode os testes do módulo e veja passar.
-- [ ] **Passo 5: commit** `core: App e agrupamento entre fontes`.
+- [ ] **Passo 5: commit** `core: App e montagem por chave`.
 
-### Tarefa 7: consultas novas no `Index`
+### Tarefa 7: tabela `app_links` e consultas no `Index`
 
-**Arquivos:** modificar `core/src/index.rs`; teste no mesmo arquivo.
+**Arquivos:** modificar `core/src/index.rs` (esquema, `replace_source`, consultas); teste no mesmo arquivo.
 
 **Interfaces:**
-- Produz em `Index`: `by_app_id(&self, app_id: &str) -> Result<Vec<Package>>`; `by_name_ci(&self, name: &str) -> Result<Vec<Package>>` (nome igual ignorando caixa); `source_counts(&self) -> Result<Vec<(SourceId, usize)>>`; `featured(&self, source: &SourceId, limit: usize, seed: u64) -> Result<Vec<Package>>`; `upgradable(&self) -> Result<Vec<Package>>`.
+- Esquema (ainda v3, mesma migração da Tarefa 1): `app_links (source TEXT NOT NULL, name TEXT NOT NULL, app_key TEXT NOT NULL, PRIMARY KEY (source, name))` e `CREATE INDEX app_links_key ON app_links (app_key)`. A tabela é uma **função pura de `packages`**: pode ser apagada e refeita a qualquer momento.
+- Regra da chave de cada pacote `p`, calculada em SQL (uma instrução, com `row_number()` para o item 2):
+  1. base = `p.app_id`, senão o menor `app_id` não nulo entre os pacotes de **nome igual em minúsculas** (de qualquer fonte), senão `lower(p.name)`;
+  2. dois pacotes com a mesma base e a mesma fonte: o de menor `name` fica com a base e cada outro recebe `base || '#' || name` (um app nunca tem duas variantes da mesma fonte);
+  3. nada além disso (nenhuma heurística de nome parecido: `firefox-bin` não junta com `firefox`).
+- Produz em `Index`: `rebuild_links(&mut self) -> Result<()>` (chamado **dentro da transação** de `replace_source`, depois de gravar os pacotes); `keys_of(&self, packages: &[Package]) -> Result<Vec<String>>` (chave de cada pacote, na mesma ordem); `members(&self, app_key: &str) -> Result<Vec<Package>>` (todos os pacotes do app); `source_counts(&self) -> Result<Vec<(SourceId, usize)>>`; `featured(&self, source: &SourceId, limit: usize, seed: u64) -> Result<Vec<Package>>`; `upgradable(&self) -> Result<Vec<Package>>`.
 - `featured`: no AUR, por `popularity` decrescente; nas demais, só pacotes com `icon`, em ordem pseudoaleatória **estável** para o mesmo `seed` (ordem por `hash(seed, name)`); sem nenhum ícone, devolve os primeiros por nome.
 
-- [ ] **Passo 1: testes que falham**: `by_app_id_finds_across_sources`, `by_name_ci_ignores_case`, `source_counts_counts_each_source`, `featured_aur_orders_by_popularity`, `featured_prefers_packages_with_icons`, `featured_is_stable_for_a_seed_and_varies_between_seeds`, `featured_falls_back_when_no_icons`, `upgradable_lists_only_flagged_packages`.
-- [ ] **Passo 2:** rode `cargo test -p store-core --features testing index::` e veja falhar.
-- [ ] **Passo 3:** implemente (ordenação por hash em Rust, sobre as linhas com ícone; o conjunto é de poucos milhares).
-- [ ] **Passo 4:** rode os testes e veja passar.
-- [ ] **Passo 5: commit** `core: consultas por app_id, nome, contagem, destaque e atualizações`.
+- [ ] **Passo 1: testes que falham** (regras de ligação): `same_app_id_links_pacman_and_flatpak`, `identical_name_links_aur_to_pacman`, `name_match_ignores_case`, `package_without_app_id_joins_the_app_id_of_a_same_named_package`, `aur_firefox_bin_does_not_link_to_firefox`, `two_packages_of_one_source_with_same_app_id_stay_separate` (pacman `foo` e `foo-extra`, ambos `app_id = org.x.Foo`, mais um flatpak `org.x.Foo`: o flatpak e `foo` compartilham a chave; `foo-extra` fica com `org.x.Foo#foo-extra`), `links_are_rebuilt_when_another_source_arrives` (AUR gravado primeiro com chave `firefox`; ao gravar o pacman com `app_id`, a chave do AUR passa a ser `org.mozilla.firefox`), `replacing_a_source_removes_its_old_links`, `rebuild_is_idempotent`.
+- [ ] **Passo 2:** testes que falham (consultas): `keys_of_keeps_the_input_order`, `members_returns_every_source`, `source_counts_counts_each_source`, `featured_aur_orders_by_popularity`, `featured_prefers_packages_with_icons`, `featured_is_stable_for_a_seed_and_varies_between_seeds`, `featured_falls_back_when_no_icons`, `upgradable_lists_only_flagged_packages`.
+- [ ] **Passo 3:** rode `cargo test -p store-core --features testing index::` e veja falhar.
+- [ ] **Passo 4:** implemente. `rebuild_links` apaga e refaz a tabela inteira com um `INSERT .. SELECT` (a regra acima), usando índices em `lower(name)` e `app_id`.
+- [ ] **Passo 5: medir**: um teste `#[ignore]` (`cargo test -p store-core --features testing -- --ignored rebuild_links_timing --nocapture`) cria 150 mil pacotes sintéticos em 3 fontes e imprime o tempo de `replace_source` e de `rebuild_links`. Registre os dois no corpo do commit. Se `rebuild_links` passar de 1 s, pare e avise o usuário antes de seguir (a alternativa é refazer só as chaves tocadas pela fonte).
+- [ ] **Passo 6:** rode a suíte do workspace.
+- [ ] **Passo 7: commit** `core: tabela app_links e consultas de destaque, contagem e atualizações`.
 
 ### Tarefa 8: `Catalog`
 
 **Arquivos:** criar `core/src/catalog.rs`; modificar `core/src/lib.rs`; teste no mesmo arquivo.
 
 **Interfaces:**
-- Consome: `Index`, `Host`, `App`, `group`.
+- Consome: `Index` (Tarefa 7), `Host`, `App`, `assemble`.
 - Produz: `pub struct Catalog`; `Catalog::new(index: Index, host: Host) -> Catalog`; `Catalog::open(path: &Path, host: Host) -> Result<Catalog>`; `pub struct Row { pub source: SourceId, pub apps: Vec<App>, pub total: usize }`; métodos: `search(&self, query: &str, source: Option<&SourceId>, limit: usize) -> Result<Vec<App>>`; `app(&self, key: &str) -> Result<Option<App>>`; `chips(&self) -> Result<Vec<(SourceId, usize)>>` (ordem do host); `home(&self, per_row: usize, seed: u64) -> Result<Vec<Row>>` (ordem do host, fontes sem pacotes ficam de fora); `installed(&self) -> Result<Vec<App>>`; `updates(&self) -> Result<Vec<App>>`.
-- Regra: cada `App` devolvido é **completo**: depois de agrupar, a variante de cada fonte é buscada por `by_app_id`/`by_name_ci`, mesmo que só uma tenha casado com a busca.
+- Regra: cada `App` devolvido é **completo**. Os pacotes encontrados viram chaves (`keys_of`), as chaves repetidas são descartadas mantendo a ordem, e cada chave é expandida com `members`, mesmo que só uma variante tenha casado com a busca. `app(key)` é `members(key)` montado, ou `None` se vazio.
 
-- [ ] **Passo 1: testes que falham**: `search_returns_one_app_with_variants_from_every_source` (a busca casa só o pacote pacman, o app traz também o flatpak), `search_with_source_filter_still_returns_complete_apps`, `search_of_punctuation_or_empty_returns_nothing`, `app_by_key_returns_none_for_unknown_key`, `chips_follow_host_order_and_skip_empty_sources`, `home_rows_follow_host_order`, `installed_groups_an_app_installed_in_two_sources`, `updates_lists_only_upgradable_apps`.
+- [ ] **Passo 1: testes que falham**: `search_returns_one_app_with_variants_from_every_source` (a busca casa só o pacote pacman; o app traz também o flatpak), `search_with_source_filter_still_returns_complete_apps`, `search_of_punctuation_or_empty_returns_nothing`, `app_by_key_returns_none_for_unknown_key`, `chips_follow_host_order_and_skip_empty_sources`, `home_rows_follow_host_order`, `installed_groups_an_app_installed_in_two_sources`, `updates_lists_only_upgradable_apps`.
 - [ ] **Passo 2:** rode `cargo test -p store-core --features testing catalog::` e veja falhar.
-- [ ] **Passo 3:** implemente. `search` pede `limit * 3` pacotes ao índice, agrupa, expande e corta em `limit`.
+- [ ] **Passo 3:** implemente. `search` pede `limit * 3` pacotes ao índice, converte em chaves, expande e corta em `limit`.
 - [ ] **Passo 4:** rode a suíte do workspace.
 - [ ] **Passo 5: commit** `core: Catalog com busca, página de app, fileiras, instalados e atualizações`.
 
@@ -297,7 +304,7 @@ Entradas que o design não nomeia e que mais provavelmente morderão. Cada uma t
 
 ## Revisão do plano contra o design
 
-- **Cobertura:** tela inicial com chips e fileiras (13–14), busca (12, 14), página do app com um botão por fonte e ordem do host (2, 6, 8, 15), agrupamento por AppStream e nome (3, 4, 6), instalar/remover pelo pacman e cancelar (12, 15), Installeds e Updates só do pacman (4, 8, 16), threads por fonte (9, 12), ícones em memória (11, 14), refresh que não bloqueia a UI (9, 12, 14), reorganização do core para compartilhar com a UI (10). Ficam de fora, conforme o design: categorias, barra lateral, Settings, cartão duplo, trending do Flathub, capturas de tela (rodada 2).
+- **Cobertura:** tela inicial com chips e fileiras (13–14), busca (12, 14), página do app com um botão por fonte e ordem do host (2, 6, 8, 15), correspondência por AppStream e nome (3, 4, 6, 7), instalar/remover pelo pacman e cancelar (12, 15), Installeds e Updates só do pacman (4, 8, 16), threads por fonte (9, 12), ícones em memória (11, 14), refresh que não bloqueia a UI (9, 12, 14), reorganização do core para compartilhar com a UI (10). Ficam de fora, conforme o design: categorias, barra lateral, Settings, cartão duplo, trending do Flathub, capturas de tela (rodada 2).
 - **Decisão do plano:** a fileira do pacman e a do Flatpak usam pacotes com ícone em ordem pseudoaleatória estável por dia, e a do AUR usa a popularidade; o trending do Flathub entra na rodada 2.
-- **Consistência de tipos:** `Host`, `App`, `Catalog`, `Row`, `RefreshStage`, `EngineConfig`, `Command`, `Event`, `AppView`, `OpState` e `Rgba` têm uma definição só e os mesmos nomes onde são usados.
+- **Consistência de tipos:** `Host`, `App`, `assemble`, `Catalog`, `Row`, `RefreshStage`, `EngineConfig`, `Command`, `Event`, `AppView`, `OpState` e `Rgba` têm uma definição só e os mesmos nomes onde são usados.
 - **Sugestão de PRs:** (A) tarefas 1–10, core, backends e `store-system`; (B) 11–12, `store-app`; (C) 13–17, GUI.
