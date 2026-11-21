@@ -22,9 +22,24 @@ fi
 for package in tree cowsay; do
     if pacman -Q "$package" >/dev/null 2>&1; then
         echo "$package is already installed, and this check would remove it. Aborting." >&2
+        pacman -Qi "$package" | grep -E '^(Install Date|Install Reason|Required By)' >&2
+        echo "If it is a leftover of an earlier run of this check (a step that failed or was" >&2
+        echo "cancelled), remove it first:  sudo pacman -Rs tree cowsay" >&2
         exit 1
     fi
 done
+
+# If a step fails or is cancelled (a dismissed password dialog, say), say what is left behind
+# instead of leaving installed packages without a word.
+finished=0
+left_behind() {
+    if [ "$finished" -eq 0 ]; then
+        echo >&2
+        echo "The check stopped early. Still installed from it: $(pacman -Q tree cowsay 2>/dev/null | tr '\n' ' ')" >&2
+        echo "Remove them with:  sudo pacman -Rs tree cowsay" >&2
+    fi
+}
+trap left_behind EXIT
 
 pause() {
     printf '\n%s\nPress Enter to run it. ' "$1"
@@ -46,6 +61,7 @@ pause "STEP 2: store install cowsay      -> a new process, so a new password dia
 pause "STEP 3: store remove tree cowsay  -> a new process again; note whether it asks."
 "$store" remove tree cowsay
 
+finished=1
 echo
 for package in tree cowsay; do
     if pacman -Q "$package" >/dev/null 2>&1; then
