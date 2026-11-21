@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::{Backend, Error, Index, Package, Result, SourceId};
+use crate::{Backend, Error, Host, Index, Package, Result, SourceId};
 
 /// What happened to one source during [`Store::refresh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,11 +31,21 @@ pub struct RefreshReport {
 pub struct Store {
     index: Index,
     backends: Vec<Box<dyn Backend>>,
+    host: Host,
 }
 
 impl Store {
     pub fn new(index: Index, backends: Vec<Box<dyn Backend>>) -> Store {
-        Store { index, backends }
+        Store {
+            index,
+            backends,
+            host: Host::none(),
+        }
+    }
+
+    /// Orders the sources of [`Store::search_by_source`] for this host.
+    pub fn with_host(self, host: Host) -> Store {
+        Store { host, ..self }
     }
 
     /// Reloads the index from every available backend. One source's outcome never affects
@@ -70,21 +80,15 @@ impl Store {
         self.index.search(query, limit)
     }
 
-    /// The best `limit` matches of every source that has any, grouped by source: pacman first,
-    /// then Flatpak, then the AUR (least trusted last), then any other source by name.
+    /// The best `limit` matches of every source that has any, grouped by source in the host's
+    /// order (see [`Host::rank`]).
     pub fn search_by_source(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<(SourceId, Vec<Package>)>> {
         let mut sources = self.index.sources()?;
-        let rank = |s: &SourceId| match s.to_string().as_str() {
-            "pacman" => 0,
-            "flatpak" => 1,
-            "aur" => 2,
-            _ => 3,
-        };
-        sources.sort_by_key(|s| (rank(s), s.to_string()));
+        self.host.sort(&mut sources);
         let mut groups = Vec::new();
         for source in sources {
             let found = self.index.search_in(query, limit, Some(&source))?;
@@ -288,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn search_by_source_groups_in_a_fixed_order_and_limits_each_source() {
+    fn search_by_source_groups_in_host_order_and_limits_each_source() {
         let mut store = Store::new(
             Index::open_in_memory().unwrap(),
             vec![
@@ -307,7 +311,8 @@ mod tests {
                 )),
                 boxed(FakeBackend::new("empty", vec![pkg("empty", "other", "y")])),
             ],
-        );
+        )
+        .with_host(Host::with_native("pacman"));
         store.refresh();
         let groups = store.search_by_source("tool", 1).unwrap();
         let order: Vec<String> = groups.iter().map(|(s, _)| s.to_string()).collect();

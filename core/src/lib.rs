@@ -1,5 +1,6 @@
 mod backend;
 mod error;
+mod host;
 mod index;
 mod installer;
 mod package;
@@ -9,6 +10,7 @@ pub mod testing;
 
 pub use backend::Backend;
 pub use error::{Error, Result};
+pub use host::Host;
 pub use index::Index;
 pub use installer::{CancelToken, InstallError, Installer};
 pub use package::{Package, SourceId};
