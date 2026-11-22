@@ -4,15 +4,18 @@ import { ChipData } from "chip.slint";
 import { RowData } from "row.slint";
 import { TopBar } from "top-bar.slint";
 import { HomePage } from "home-page.slint";
+import { ListPage, EmptyKind } from "list-page.slint";
 import { AppPage, AppPageData, SourceButtonData } from "app-page.slint";
 import { OperationBar } from "operation-bar.slint";
 
-export { CardData, ChipData, RowData, TextUtil, AppPageData, SourceButtonData }
+export { EmptyKind, CardData, ChipData, RowData, TextUtil, AppPageData, SourceButtonData }
 
 // Which page shows below the top bar. Home keeps its rows and results while the app page shows.
 export enum Page {
     home,
     app,
+    installed,
+    updates,
 }
 
 export component AppWindow inherits Window {
@@ -23,6 +26,13 @@ export component AppWindow inherits Window {
     in-out property <string> query;
     in-out property <Page> page: Page.home;
     in property <AppPageData> app-page;
+    // the Installeds and Updates lists, their "(12)" counts and what an empty one says
+    in property <[CardData]> installed;
+    in property <string> installed-count;
+    in property <EmptyKind> installed-empty;
+    in property <[CardData]> updates;
+    in property <string> updates-count;
+    in property <EmptyKind> updates-empty;
     // an install or remove is running
     in property <bool> op-active;
     in property <string> op-message;
@@ -65,11 +75,11 @@ export component AppWindow inherits Window {
                 root.chip-clicked(source);
             }
             show-installed => {
-                root.page = Page.home;
+                root.page = Page.installed;
                 root.show-installed();
             }
             show-updates => {
-                root.page = Page.home;
+                root.page = Page.updates;
                 root.show-updates();
             }
             show-home => {
@@ -91,6 +101,27 @@ export component AppWindow inherits Window {
             results: root.results;
             searching: root.searching;
             query-active: root.query != "";
+            card-clicked(key) => {
+                root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.installed: ListPage {
+            title: @tr("Installeds");
+            count-text: root.installed-count;
+            cards: root.installed;
+            empty: root.installed-empty;
+            card-clicked(key) => {
+                root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.updates: ListPage {
+            title: @tr("Updates");
+            count-text: root.updates-count;
+            note: @tr("Updates are listed for pacman only");
+            cards: root.updates;
+            empty: root.updates-empty;
             card-clicked(key) => {
                 root.card-clicked(key);
             }

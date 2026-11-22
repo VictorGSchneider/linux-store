@@ -2,7 +2,8 @@
 //! first (testable without a window); the Slint structs are built at the edge.
 use store_core::{App, Row, SourceId};
 
-use crate::{AppPageData, CardData, ChipData, RowData, SourceButtonData};
+use crate::state::Place;
+use crate::{AppPageData, CardData, ChipData, EmptyKind, RowData, SourceButtonData};
 
 /// What a card shows, before it becomes a Slint struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,10 +352,41 @@ pub fn page_data(view: &PageView, icon: Option<slint::Image>) -> AppPageData {
     }
 }
 
+/// The item count next to a list page's title: "(12)". The title itself is translated in the UI.
+pub fn count_text(count: usize) -> String {
+    format!("({count})")
+}
+
+/// Which explanation a list page shows instead of its (empty) grid.
+pub fn empty_kind(place: Place, count: usize) -> EmptyKind {
+    match (place, count) {
+        (_, n) if n > 0 => EmptyKind::None,
+        (Place::Installed, _) => EmptyKind::NothingInstalled,
+        (Place::Updates, _) => EmptyKind::UpToDate,
+        (Place::Home, _) => EmptyKind::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use store_core::Package;
+
+    #[test]
+    fn count_text_formats_zero_one_and_many() {
+        assert_eq!(count_text(0), "(0)");
+        assert_eq!(count_text(1), "(1)");
+        assert_eq!(count_text(1234), "(1234)");
+    }
+
+    #[test]
+    fn empty_state_depends_on_the_page_and_the_count() {
+        assert_eq!(empty_kind(Place::Installed, 0), EmptyKind::NothingInstalled);
+        assert_eq!(empty_kind(Place::Updates, 0), EmptyKind::UpToDate);
+        assert_eq!(empty_kind(Place::Installed, 1), EmptyKind::None);
+        assert_eq!(empty_kind(Place::Updates, 7), EmptyKind::None);
+        assert_eq!(empty_kind(Place::Home, 0), EmptyKind::None);
+    }
 
     fn pkg(source: &str, installed: bool) -> Package {
         Package {

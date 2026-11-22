@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use linux_store::{AppWindow, wiring};
+use linux_store::{AppWindow, Page, wiring};
 use slint::{ComponentHandle, Model};
 use store_core::testing::FakeInstaller;
 use store_core::{Host, InstallError, SourceId};
@@ -130,8 +130,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("opening {} ({})", first.title, first.key);
                                 ui.invoke_card_clicked(first.key);
                                 *step = Step::Page(Instant::now(), "installed-open");
-                            } else {
+                            } else if name == "installed-open" {
                                 save(&ui, &format!("{dir2}/installed-page.png"))?;
+                                ui.invoke_show_installed();
+                                *step = Step::Page(Instant::now(), "list-installed");
+                            } else if name == "list-installed" {
+                                println!("installed: {} cards", ui.get_installed().row_count());
+                                assert_eq!(ui.get_page(), Page::Installed);
+                                save(&ui, &format!("{dir2}/installed-list.png"))?;
+                                ui.invoke_show_updates();
+                                *step = Step::Page(Instant::now(), "list-updates");
+                            } else if name == "list-updates" {
+                                println!("updates: {} cards", ui.get_updates().row_count());
+                                assert_eq!(ui.get_page(), Page::Updates);
+                                save(&ui, &format!("{dir2}/updates-list.png"))?;
+                                ui.invoke_show_installed();
+                                *step = Step::Page(Instant::now(), "list-open");
+                            } else if name == "list-open" {
+                                let first = ui.get_installed().row_data(0).ok_or("no installed")?;
+                                println!("opening {} from Installeds", first.title);
+                                ui.invoke_card_clicked(first.key);
+                                *step = Step::Page(Instant::now(), "list-back");
+                            } else if name == "list-back" {
+                                assert_eq!(ui.get_page(), Page::App);
+                                ui.invoke_back();
+                                assert_eq!(
+                                    ui.get_page(),
+                                    Page::Installed,
+                                    "Back returns to the list"
+                                );
+                                ui.window().set_size(slint::PhysicalSize::new(480, 800));
+                                *step = Step::Page(Instant::now(), "list-narrow");
+                            } else if name == "list-narrow" {
+                                save(&ui, &format!("{dir2}/installed-narrow.png"))?;
+                                ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+                                // scroll far down: only the cards in view exist, and they must
+                                // be where the scroll position says
+                                ui.window().dispatch_event(
+                                    slint::platform::WindowEvent::PointerScrolled {
+                                        position: slint::LogicalPosition::new(600.0, 500.0),
+                                        delta_x: 0.0,
+                                        delta_y: -30000.0,
+                                    },
+                                );
+                                *step = Step::Page(Instant::now(), "list-scrolled");
+                            } else {
+                                save(&ui, &format!("{dir2}/installed-scrolled.png"))?;
                                 *step = Step::Done;
                             }
                         }

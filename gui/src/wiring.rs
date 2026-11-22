@@ -10,7 +10,7 @@ use store_app::{AppView, Command, Engine, EngineConfig, Event, OpState};
 use store_core::{App, Row, SourceId};
 
 use crate::convert;
-use crate::state::{OpGate, PageKeys, status_visible_for};
+use crate::state::{Nav, OpGate, PageKeys, Place, status_visible_for};
 use crate::{AppWindow, CardData, Page, TextUtil};
 
 /// Cards per home row (the row component instantiates every card it gets).
@@ -36,6 +36,10 @@ struct State {
     /// Card key to icon path, for the cards in `rows` and in `results`.
     row_icons: HashMap<String, String>,
     result_icons: HashMap<String, String>,
+    installed_icons: HashMap<String, String>,
+    updates_icons: HashMap<String, String>,
+    /// The page below the app page, and so where Back goes.
+    nav: Nav,
     refreshes_done: usize,
     /// Which app the user asked for and which one the page shows.
     keys: PageKeys,
@@ -85,6 +89,9 @@ pub fn install(ui: &AppWindow, config: EngineConfig) -> Result<(), store_core::E
         requested: HashSet::new(),
         row_icons: HashMap::new(),
         result_icons: HashMap::new(),
+        installed_icons: HashMap::new(),
+        updates_icons: HashMap::new(),
+        nav: Nav::default(),
         refreshes_done: 0,
         keys: PageKeys::default(),
         page_icon: None,
@@ -118,13 +125,13 @@ pub fn install(ui: &AppWindow, config: EngineConfig) -> Result<(), store_core::E
     let weak = ui.as_weak();
     ui.on_show_installed(move || {
         if let Some(ui) = weak.upgrade() {
-            with_state(|s| s.leave_app_page(&ui));
+            with_state(|s| s.show_list(&ui, Place::Installed));
         }
     });
     let weak = ui.as_weak();
     ui.on_show_updates(move || {
         if let Some(ui) = weak.upgrade() {
-            with_state(|s| s.leave_app_page(&ui));
+            with_state(|s| s.show_list(&ui, Place::Updates));
         }
     });
     let weak = ui.as_weak();
@@ -229,6 +236,9 @@ impl State {
                 if self.searching() {
                     self.run_search(ui);
                 }
+                // The list on show (or under the app page) may have changed: an operation
+                // refreshes its source, so a just installed app appears and a removed one goes.
+                self.request_list(self.nav.place());
                 // An operation refreshes its source: reload the open page (its status stays).
                 if ui.get_page() == Page::App
                     && let Some(key) = self.keys.page().map(str::to_string)
@@ -257,7 +267,11 @@ impl State {
                 // The operation state belongs to Started/Progress/Finished only: an unrelated
                 // error must not hide a running operation or let a second one start.
             }
-            // Refresh progress, installed and updates: later tasks.
+            // Both lists are cheap: the model is always updated, only the visible page shows it
+            // and an answer never changes the page.
+            Event::Installed(apps) => self.show_installed(ui, &apps),
+            Event::Updates(apps) => self.show_updates(ui, &apps),
+            // Refresh progress: a later task.
             _ => {}
         }
     }
@@ -283,6 +297,33 @@ impl State {
         let data = convert::cards(apps, &|p| images.get(p).cloned());
         ui.set_results(ModelRc::new(VecModel::from(data)));
         self.result_icons = self.note_icons(apps.iter());
+    }
+
+    fn show_installed(&mut self, ui: &AppWindow, apps: &[App]) {
+        let images = &self.images;
+        let data = convert::cards(apps, &|p| images.get(p).cloned());
+        ui.set_installed_count(convert::count_text(data.len()).into());
+        ui.set_installed_empty(convert::empty_kind(Place::Installed, data.len()));
+        ui.set_installed(ModelRc::new(VecModel::from(data)));
+        self.installed_icons = self.note_icons(apps.iter());
+    }
+
+    fn show_updates(&mut self, ui: &AppWindow, apps: &[App]) {
+        let images = &self.images;
+        let data = convert::cards(apps, &|p| images.get(p).cloned());
+        ui.set_updates_count(convert::count_text(data.len()).into());
+        ui.set_updates_empty(convert::empty_kind(Place::Updates, data.len()));
+        ui.set_updates(ModelRc::new(VecModel::from(data)));
+        self.updates_icons = self.note_icons(apps.iter());
+    }
+
+    /// Asks the engine for the list of `place`, if it is a list page.
+    fn request_list(&self, place: Place) {
+        match place {
+            Place::Installed => self.engine.send(Command::Installed),
+            Place::Updates => self.engine.send(Command::Updates),
+            Place::Home => {}
+        }
     }
 
     /// Maps card keys to icon paths, and asks the engine once for each path not loaded yet.
@@ -321,6 +362,8 @@ impl State {
             }
         }
         apply(ui.get_results(), &self.result_icons);
+        apply(ui.get_installed(), &self.installed_icons);
+        apply(ui.get_updates(), &self.updates_icons);
         if self.page_icon.as_deref() == Some(path) {
             let mut page = ui.get_app_page();
             page.icon = image.clone();
@@ -344,6 +387,7 @@ impl State {
         }
         let Some(view) = view else {
             self.keys.not_found();
+            self.nav.go(Place::Home);
             ui.set_page(Page::Home);
             ui.set_app_missing(true);
             return;
@@ -384,15 +428,27 @@ impl State {
 
     /// Every way of leaving the app page (Back, search, chips, Home, Installeds, Updates):
     /// answers still in flight become stale. A running operation is not cancelled.
-    fn leave_app_page(&mut self, ui: &AppWindow) {
+    /// `place` is the page the user goes to; the app page's own Back returns to where it came from.
+    fn leave_app_page(&mut self, ui: &AppWindow, place: Place) {
         self.keys.leave();
         self.page_icon = None;
-        ui.set_page(Page::Home);
+        self.nav.go(place);
+        ui.set_page(match place {
+            Place::Home => Page::Home,
+            Place::Installed => Page::Installed,
+            Place::Updates => Page::Updates,
+        });
         self.show_status(ui);
     }
 
     fn back(&mut self, ui: &AppWindow) {
-        self.leave_app_page(ui);
+        let place = self.nav.back();
+        self.leave_app_page(ui, place);
+    }
+
+    fn show_list(&mut self, ui: &AppWindow, place: Place) {
+        self.leave_app_page(ui, place);
+        self.request_list(place);
     }
 
     fn operation_clicked(&mut self, ui: &AppWindow, source: &str, remove: bool) {
@@ -451,7 +507,7 @@ impl State {
     }
 
     fn search_edited(&mut self, ui: &AppWindow, text: &str) {
-        self.leave_app_page(ui);
+        self.leave_app_page(ui, Place::Home);
         self.query = text.to_string();
         if self.searching() {
             self.run_search(ui);
@@ -475,7 +531,7 @@ impl State {
     }
 
     fn chip_clicked(&mut self, ui: &AppWindow, source: &str) {
-        self.leave_app_page(ui);
+        self.leave_app_page(ui, Place::Home);
         let id = SourceId::new(source);
         self.filter = if self.filter.as_ref() == Some(&id) {
             None

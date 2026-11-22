@@ -83,6 +83,46 @@ impl OpGate {
     }
 }
 
+/// The page below the app page: where the user is, or where Back returns to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// Home rows or search results.
+    #[default]
+    Home,
+    Installed,
+    Updates,
+}
+
+impl Place {
+    /// Whether this page shows a list the engine can be asked for again.
+    pub fn is_list(self) -> bool {
+        self != Place::Home
+    }
+}
+
+/// Where the user is. Opening an app puts its page on top without changing `place`, so Back
+/// returns to the page the user came from, list contents included.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Nav {
+    place: Place,
+}
+
+impl Nav {
+    /// The user went to `place` (search, chip, Home, Installeds, Updates).
+    pub fn go(&mut self, place: Place) {
+        self.place = place;
+    }
+
+    pub fn place(&self) -> Place {
+        self.place
+    }
+
+    /// Where Back from an app page goes.
+    pub fn back(&self) -> Place {
+        self.place
+    }
+}
+
 /// An operation's result is shown only on the page of the app it was started for.
 pub fn status_visible_for(op_key: Option<&str>, page_key: Option<&str>) -> bool {
     matches!((op_key, page_key), (Some(a), Some(b)) if a == b)
@@ -137,6 +177,21 @@ mod tests {
         assert_eq!(g.click(None, false), None);
         assert_eq!(g.click(Some("a"), true), None);
         assert!(!g.busy());
+    }
+
+    #[test]
+    fn back_returns_to_where_the_user_came_from() {
+        let mut n = Nav::default();
+        assert_eq!(n.back(), Place::Home);
+        n.go(Place::Installed);
+        // opening an app does not change the place
+        assert_eq!(n.back(), Place::Installed);
+        n.go(Place::Updates);
+        assert_eq!(n.back(), Place::Updates);
+        n.go(Place::Home);
+        assert_eq!(n.back(), Place::Home);
+        assert!(!Place::Home.is_list());
+        assert!(Place::Installed.is_list() && Place::Updates.is_list());
     }
 
     #[test]

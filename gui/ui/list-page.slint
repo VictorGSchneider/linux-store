@@ -1,0 +1,108 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, CardData } from "card.slint";
+
+// Which explanation replaces an empty grid. Chosen by the host (`convert::empty_kind`).
+export enum EmptyKind {
+    none,
+    nothing-installed,
+    up-to-date,
+}
+
+// A scrollable grid of cards with a title and the item count: the Installeds and Updates pages.
+// Size contract: the engine returns every installed (or updatable) app, unbounded (a desktop has
+// well over a thousand packages). The grid keeps its full height, but only the cards in view
+// plus a margin are instantiated: positions past ~32000 px break the software renderer (i16
+// coordinates, a panic), and a thousand cards is needless work. The Cards are cheap otherwise.
+export component ListPage inherits Rectangle {
+    in property <string> title;
+    // the count as shown next to the title, e.g. "(12)"
+    in property <string> count-text;
+    // a fixed explanation under the title, shown whenever it is not empty
+    in property <string> note;
+    in property <[CardData]> cards;
+    in property <EmptyKind> empty: EmptyKind.none;
+    callback card-clicked(string);
+
+    private property <length> content-width: min(self.width, Theme.content-max-width) - 2 * Theme.page-padding;
+    // as many cards as fit the width, at least one
+    private property <int> columns: max(1, Math.floor((content-width + Theme.card-gap) / (Theme.card-width + Theme.card-gap)));
+    private property <int> grid-rows: Math.ceil(root.cards.length / root.columns);
+    private property <length> pitch: Theme.card-height + Theme.card-gap;
+    // The rows to instantiate: from one above the scroll position (the header above the grid
+    // is shorter than a row, so the first visible row is never above this one) for the rows
+    // that fit the viewport plus a margin.
+    private property <int> first-row: max(0, Math.floor(-scroll.content-y / root.pitch) - 1);
+    private property <int> shown-cards: max(0, min(root.cards.length - root.first-row * root.columns, (Math.ceil(root.height / root.pitch) + 3) * root.columns));
+
+    scroll := ScrollView {
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            padding-top: 16px;
+            padding-bottom: Theme.page-padding;
+            spacing: Theme.row-gap;
+            alignment: start;
+
+            HorizontalLayout {
+                alignment: center;
+                VerticalLayout {
+                    width: root.content-width;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        Text {
+                            text: root.title;
+                            color: Theme.text;
+                            font-size: Theme.font-page-title;
+                            font-weight: 600;
+                            accessible-role: text;
+                        }
+
+                        Text {
+                            text: root.count-text;
+                            color: Theme.text-dim;
+                            font-size: Theme.font-page-title;
+                            vertical-alignment: bottom;
+                            accessible-role: text;
+                        }
+                    }
+
+                    if root.note != "": Text {
+                        text: root.note;
+                        color: Theme.text-dim;
+                        font-size: Theme.font-body;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                    }
+                }
+            }
+
+            if root.empty != EmptyKind.none: Text {
+                text: root.empty == EmptyKind.nothing-installed ? @tr("Nothing installed yet") : @tr("Everything is up to date");
+                color: Theme.text-dim;
+                font-size: Theme.font-message;
+                horizontal-alignment: center;
+                accessible-role: text;
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: root.content-width;
+                    height: root.grid-rows * root.pitch;
+                    for i in root.shown-cards: Card {
+                        x: Math.mod(i, root.columns) * (Theme.card-width + Theme.card-gap);
+                        y: (root.first-row + Math.floor(i / root.columns)) * root.pitch;
+                        data: root.cards[root.first-row * root.columns + i];
+                        clicked(key) => {
+                            root.card-clicked(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
