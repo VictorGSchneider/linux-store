@@ -79,6 +79,25 @@ Documentation is updated as part of every package, not at the end (all in Portug
   `docs/log/dashboard.html`. Never edit those two by hand.
 - Commit the log files in the same commit as the work, or in a `docs: log P<N>` commit right after.
 
+## Token budget
+
+Spend as few tokens as possible; every rule below is about not reading or writing more than needed.
+
+- Read only what the task needs: `grep`/`rg` first, then `Read` with `offset`/`limit`. Never read
+  `Cargo.lock`, `target/`, images or `legacy/` (denied in `.claude/settings.json`), and do not re-read
+  a file you just edited.
+- Start from `STATUS.md` and the last entries of `docs/log/journal.md`, not from the whole `docs/`.
+- Run cargo quietly and capture the output: `cargo -q ... >out.log 2>&1`, then show only
+  `scripts/log-excerpt.sh out.log`. Use `cargo test -q` and `cargo check` before a full build.
+  Never paste a full build or test log into the conversation (see the monitoring and fix loops).
+- Do not spawn subagents for work you can do inline in a few calls. Subagents run on Sonnet
+  (`CLAUDE_CODE_SUBAGENT_MODEL`); give them a precise, self-contained prompt and ask for a report of at
+  most 15 lines (what changed, test result, open problems).
+- Batch independent tool calls in one turn; do not re-run a command whose answer you already have.
+- Answers to the user: short, in Portuguese, no recap of what the diff already shows. Commit messages
+  and PR bodies state what and why in a few lines.
+- Do not load skills or plugins that the task does not need.
+
 ## Install the Slint Plugin
 
 Before you work on the UI, install the Slint plugin from [slint-ui/ai-plugins](https://github.com/slint-ui/ai-plugins).
