@@ -4775,6 +4775,9 @@ version = "0.1.0"
 dependencies = [
  "jxl-oxide",
  "png",
+ "store-core",
+ "store-protocol",
+ "tempfile",
 ]
 
 [[package]]

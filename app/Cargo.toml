@@ -3,8 +3,14 @@ name = "store-app"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "Application logic of the GUI that does not depend on Slint: icon decoding, caches and colors"
+description = "Application logic of the GUI that does not depend on Slint: the engine threads, icon decoding, caches and colors"
 
 [dependencies]
 jxl-oxide = "0.12.6"
 png = "0.18.1"
+store-core = { path = "../core" }
+store-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+store-core = { path = "../core", features = ["testing"] }
+tempfile = "3.27.0"
