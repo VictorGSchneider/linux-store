@@ -12,7 +12,9 @@ pub struct Row {
 }
 
 /// Read API over the index for the UI. Every [`App`] it returns is complete: it carries the
-/// variants from all sources, even when only one of them matched the query.
+/// variants from all sources, even when only one of them matched the query. Each public method
+/// reads one snapshot of the index (one read transaction), so a refresh committing meanwhile
+/// cannot drop a package between its statements.
 pub struct Catalog {
     index: Index,
     host: Host,
@@ -32,68 +34,80 @@ impl Catalog {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let found = self
-            .index
-            .search_in(query, limit.saturating_mul(3), source)?;
-        let mut apps = self.complete(found)?;
-        apps.truncate(limit);
-        Ok(apps)
+        self.index.read(|index| {
+            let found = index.search_in(query, limit.saturating_mul(3), source)?;
+            let mut apps = self.complete(index, found)?;
+            apps.truncate(limit);
+            Ok(apps)
+        })
     }
 
     pub fn app(&self, key: &str) -> Result<Option<App>> {
-        let members = self.index.members(key)?;
+        let members = self.index.read(|index| index.members(key))?;
         let linked = members.into_iter().map(|p| (key.to_string(), p)).collect();
         Ok(assemble(linked, &self.host).pop())
     }
 
     /// Sources with packages and their package counts, in host order.
     pub fn chips(&self) -> Result<Vec<(SourceId, usize)>> {
-        let mut counts = self.index.source_counts()?;
+        self.index.read(|index| self.chips_in(index))
+    }
+
+    fn chips_in(&self, index: &Index) -> Result<Vec<(SourceId, usize)>> {
+        let mut counts = index.source_counts()?;
         counts.sort_by_key(|(source, _)| self.host.rank(source));
         Ok(counts)
     }
 
     pub fn home(&self, per_row: usize, seed: u64) -> Result<Vec<Row>> {
-        let mut rows = Vec::new();
-        for (source, total) in self.chips()? {
-            let featured = self.index.featured(&source, per_row, seed)?;
-            let apps = self.complete(featured)?;
-            if !apps.is_empty() {
-                rows.push(Row {
-                    source,
-                    apps,
-                    total,
-                });
+        self.index.read(|index| {
+            let mut rows = Vec::new();
+            for (source, total) in self.chips_in(index)? {
+                let featured = index.featured(&source, per_row, seed)?;
+                let apps = self.complete(index, featured)?;
+                if !apps.is_empty() {
+                    rows.push(Row {
+                        source,
+                        apps,
+                        total,
+                    });
+                }
             }
-        }
-        Ok(rows)
+            Ok(rows)
+        })
     }
 
     pub fn installed(&self) -> Result<Vec<App>> {
-        let packages = self.index.installed()?;
-        self.complete_sorted(packages)
+        self.index.read(|index| {
+            let packages = index.installed()?;
+            self.complete_sorted(index, packages)
+        })
     }
 
     pub fn updates(&self) -> Result<Vec<App>> {
-        let packages = self.index.upgradable()?;
-        self.complete_sorted(packages)
+        self.index.read(|index| {
+            let packages = index.upgradable()?;
+            self.complete_sorted(index, packages)
+        })
     }
 
-    fn complete_sorted(&self, packages: Vec<Package>) -> Result<Vec<App>> {
-        let mut apps = self.complete(packages)?;
+    fn complete_sorted(&self, index: &Index, packages: Vec<Package>) -> Result<Vec<App>> {
+        let mut apps = self.complete(index, packages)?;
         apps.sort_by_cached_key(|a| (a.title.to_lowercase(), a.key.clone()));
         Ok(apps)
     }
 
-    /// Turns found packages into complete apps, one per key, in first-seen order.
-    fn complete(&self, packages: Vec<Package>) -> Result<Vec<App>> {
+    /// Turns found packages into complete apps, one per key, in first-seen order. Runs inside
+    /// the caller's read transaction (`index` is `self.index`), so the packages, their keys and
+    /// their members come from one snapshot.
+    fn complete(&self, index: &Index, packages: Vec<Package>) -> Result<Vec<App>> {
         let mut seen = HashSet::new();
         let mut linked = Vec::new();
-        for key in self.index.keys_of(&packages)? {
+        for key in index.keys_of(&packages)? {
             if seen.contains(&key) {
                 continue;
             }
-            for member in self.index.members(&key)? {
+            for member in index.members(&key)? {
                 linked.push((key.clone(), member));
             }
             seen.insert(key);

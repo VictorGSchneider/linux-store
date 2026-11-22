@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Error, Package, Result, SourceId};
 
@@ -287,15 +287,38 @@ impl Index {
         Ok(())
     }
 
-    /// The app key of each package, in the same order. A package that is not indexed is an error.
+    /// The app key of each package, in the same order, skipping packages that are not indexed.
     pub fn keys_of(&self, packages: &[Package]) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT app_key FROM app_links WHERE source = ?1 AND name = ?2")?;
-        packages
-            .iter()
-            .map(|p| Ok(stmt.query_row(params![p.source.as_str(), p.name], |r| r.get(0))?))
-            .collect()
+        let mut keys = Vec::with_capacity(packages.len());
+        for p in packages {
+            // A package that is no longer linked (a refresh committed after it was found) is
+            // skipped: its absence is not an error for the reader.
+            if let Some(key) = stmt
+                .query_row(params![p.source.as_str(), p.name], |r| r.get(0))
+                .optional()?
+            {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Runs `f` inside one deferred read transaction, so every statement it runs sees the same
+    /// snapshot of the index even while another connection commits a refresh. Not reentrant:
+    /// `f` must not call `read` again.
+    pub fn read<R>(&self, f: impl FnOnce(&Index) -> Result<R>) -> Result<R> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let result = f(self);
+        // Only reads happened, so ending the transaction either way loses nothing.
+        let end = self
+            .conn
+            .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" });
+        let value = result?;
+        end?;
+        Ok(value)
     }
 
     /// Every package linked to `app_key`, ordered by source then name.
@@ -1341,7 +1364,39 @@ mod tests {
             pkg("pacman", "b", "x"),
         ];
         assert_eq!(idx.keys_of(&ask).unwrap(), ["c", "a", "b"]);
-        assert!(idx.keys_of(&[pkg("aur", "missing", "x")]).is_err());
+        // A package that is gone (a refresh committed in between) is skipped, not an error.
+        assert_eq!(
+            idx.keys_of(&[pkg("aur", "missing", "x"), pkg("pacman", "a", "x")])
+                .unwrap(),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn a_read_sees_one_snapshot_while_another_connection_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut writer = Index::open(&path).unwrap();
+        writer
+            .replace_source(&sid("pacman"), &[pkg("pacman", "htop", "x")])
+            .unwrap();
+        let reader = Index::open(&path).unwrap();
+        let (found, keys, members) = reader
+            .read(|ix| {
+                let found = ix.search_in("htop", 10, None)?;
+                // A refresh drops the package between the two statements.
+                writer.replace_source(&sid("pacman"), &[]).unwrap();
+                let keys = ix.keys_of(&found)?;
+                let members = ix.members("htop")?;
+                Ok((found, keys, members))
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(keys, ["htop"], "the read keeps its snapshot");
+        assert_eq!(members.len(), 1);
+        // Outside the read, the change is visible.
+        assert!(reader.search_in("htop", 10, None).unwrap().is_empty());
+        assert!(reader.keys_of(&found).unwrap().is_empty());
     }
 
     #[test]

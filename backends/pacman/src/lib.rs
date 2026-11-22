@@ -32,15 +32,6 @@ struct CatalogEntry {
     icon: Option<String>,
 }
 
-/// True when `value` is exactly one ordinary path component, so joining it onto a directory
-/// cannot leave that directory (no `..`, no absolute path, no subdirectory, not empty).
-/// Duplicated from the Flatpak backend on purpose.
-fn is_plain_file_name(value: &str) -> bool {
-    let mut components = Path::new(value).components();
-    matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none()
-}
-
 /// The cached 64 px icon, else the narrowest cached one, when its file is really on disk.
 fn catalog_icon(c: &store_appstream::Component, icons_root: &Path) -> Option<String> {
     let icon = c
@@ -54,7 +45,7 @@ fn catalog_icon(c: &store_appstream::Component, icons_root: &Path) -> Option<Str
                 .filter(|i| i.kind == "cached" && i.width.is_some())
                 .min_by_key(|i| i.width)
         })?;
-    if !is_plain_file_name(&icon.value) {
+    if !store_appstream::is_plain_file_name(&icon.value) {
         return None;
     }
     let width = icon.width?;
@@ -99,7 +90,7 @@ fn read_catalog(dirs: &[PathBuf]) -> HashMap<String, CatalogEntry> {
             };
             // The origin comes from the same untrusted file as the icon values.
             let icons_root = origin
-                .filter(|o| is_plain_file_name(o))
+                .filter(|o| store_appstream::is_plain_file_name(o))
                 .map(|o| dir.join("icons").join(o));
             for c in apps {
                 let icon = icons_root

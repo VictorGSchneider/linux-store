@@ -215,9 +215,46 @@ pub fn parse_file(
     }
 }
 
+/// True when `value` is exactly one ordinary path component, so joining it onto a directory
+/// cannot leave that directory (no `..`, no absolute path, no subdirectory, not empty). Catalog
+/// values (icon names, origins) are untrusted: check them with this before joining.
+pub fn is_plain_file_name(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_file_names_are_single_normal_components() {
+        for good in [
+            "firefox.png",
+            "org.gnome.Calculator.png",
+            "a",
+            "x..y",
+            "...",
+            "core",
+        ] {
+            assert!(is_plain_file_name(good), "{good:?} must be accepted");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "/",
+            "/etc/passwd",
+            "../x",
+            "a/b",
+            "a/../b",
+            "./a",
+            "/a",
+        ] {
+            assert!(!is_plain_file_name(bad), "{bad:?} must be refused");
+        }
+    }
 
     fn parse(xml: &str) -> (Option<String>, Vec<Component>) {
         let dir = tempfile::tempdir().unwrap();

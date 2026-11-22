@@ -2,6 +2,9 @@ use std::collections::HashSet;
 
 use crate::{Backend, Error, Host, Index, Package, Result, SourceId};
 
+/// How often [`Store::refresh_with_more`] asks for more sources while it waits for collections.
+pub const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// What happened to one source during [`Store::refresh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -73,24 +76,50 @@ impl Store {
         only: Option<&[SourceId]>,
         progress: &(dyn Fn(&SourceId, &RefreshStage) + Sync),
     ) -> RefreshReport {
+        self.refresh_with_more(only, progress, &Vec::new)
+    }
+
+    /// Like [`Store::refresh_with`], but while the pass runs it also polls `more` (on the calling
+    /// thread, after each finished source and at least every [`POLL`]) for sources that must be
+    /// collected again, for example because an operation just changed them. Such a source is
+    /// collected anew at once, without waiting for the slower sources of the pass; if it is being
+    /// collected at that moment, it is collected once more after that collection ends, because
+    /// the running one may have read the system before the change. Each new collection reports
+    /// `Started` then `Finished`. Names that match no backend are ignored. `RefreshReport.sources`
+    /// lists every collected source once, in backend order, with its last outcome.
+    pub fn refresh_with_more(
+        &mut self,
+        only: Option<&[SourceId]>,
+        progress: &dyn Fn(&SourceId, &RefreshStage),
+        more: &dyn Fn() -> Vec<SourceId>,
+    ) -> RefreshReport {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Run {
+            Idle,
+            Running,
+            /// Running, and to be collected again when it ends.
+            Again,
+        }
         let Store {
             index, backends, ..
         } = self;
-        let in_scope: Vec<(SourceId, &dyn Backend)> = backends
-            .iter()
-            .map(|b| (b.source(), b.as_ref()))
-            .filter(|(source, _)| only.is_none_or(|only| only.contains(source)))
-            .collect();
-        for (source, _) in &in_scope {
-            progress(source, &RefreshStage::Started);
-        }
-        let mut outcomes: Vec<Option<Outcome>> = vec![None; in_scope.len()];
+        let all: Vec<(SourceId, &dyn Backend)> =
+            backends.iter().map(|b| (b.source(), b.as_ref())).collect();
+        let mut outcomes: Vec<Option<Outcome>> = vec![None; all.len()];
+        let mut runs = vec![Run::Idle; all.len()];
         let mut pending = 0;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            for (i, (source, backend)) in in_scope.iter().enumerate() {
+            // Spawns the collection of `all[i]`, or reports it unavailable. `Started` is reported
+            // by the caller.
+            let collect = |i: usize,
+                           runs: &mut [Run],
+                           outcomes: &mut [Option<Outcome>],
+                           pending: &mut usize| {
+                let (source, backend) = (&all[i].0, all[i].1);
                 if backend.is_available() {
-                    pending += 1;
+                    *pending += 1;
+                    runs[i] = Run::Running;
                     let tx = tx.clone();
                     scope.spawn(move || {
                         let collected =
@@ -107,11 +136,44 @@ impl Store {
                     progress(source, &RefreshStage::Finished(outcome.clone()));
                     outcomes[i] = Some(outcome);
                 }
+            };
+            let in_scope: Vec<usize> = (0..all.len())
+                .filter(|&i| only.is_none_or(|only| only.contains(&all[i].0)))
+                .collect();
+            // Every `Started` of the pass comes before any collection runs.
+            for &i in &in_scope {
+                progress(&all[i].0, &RefreshStage::Started);
             }
-            drop(tx);
-            for _ in 0..pending {
-                let Ok((i, collected)) = rx.recv() else { break };
-                let source = &in_scope[i].0;
+            for &i in &in_scope {
+                collect(i, &mut runs, &mut outcomes, &mut pending);
+            }
+            let start = |i: usize,
+                         runs: &mut [Run],
+                         outcomes: &mut [Option<Outcome>],
+                         pending: &mut usize| {
+                progress(&all[i].0, &RefreshStage::Started);
+                collect(i, runs, outcomes, pending);
+            };
+            loop {
+                for wanted in more() {
+                    let Some(i) = all.iter().position(|(s, _)| *s == wanted) else {
+                        continue;
+                    };
+                    match runs[i] {
+                        Run::Idle => start(i, &mut runs, &mut outcomes, &mut pending),
+                        Run::Running | Run::Again => runs[i] = Run::Again,
+                    }
+                }
+                if pending == 0 {
+                    break;
+                }
+                let (i, collected) = match rx.recv_timeout(POLL) {
+                    Ok(message) => message,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                pending -= 1;
+                let source = &all[i].0;
                 let outcome = match collected {
                     Err(_) => Outcome::Failed("backend panicked".to_string()),
                     Ok(collected) => match collected.and_then(|packages| {
@@ -125,15 +187,19 @@ impl Store {
                 };
                 progress(source, &RefreshStage::Finished(outcome.clone()));
                 outcomes[i] = Some(outcome);
+                let again = runs[i] == Run::Again;
+                runs[i] = Run::Idle;
+                if again {
+                    start(i, &mut runs, &mut outcomes, &mut pending);
+                }
             }
         });
         RefreshReport {
-            sources: in_scope
+            sources: all
                 .into_iter()
                 .zip(outcomes)
-                .map(|((source, _), outcome)| SourceReport {
-                    source,
-                    outcome: outcome.expect("every source in scope gets an outcome"),
+                .filter_map(|((source, _), outcome)| {
+                    outcome.map(|outcome| SourceReport { source, outcome })
                 })
                 .collect(),
         }
@@ -579,6 +645,170 @@ mod tests {
             .collect();
         assert_eq!(names, ["slow", "fast", "off"]);
         assert_eq!(report.sources[0].outcome, Outcome::Updated { packages: 1 });
+    }
+
+    /// A backend whose package list is read from a shared cell when `packages()` starts, and
+    /// whose first `packages()` call can be held until the test releases it.
+    struct LiveBackend {
+        source: SourceId,
+        names: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        hold_first: Option<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LiveBackend {
+        fn new(source: &str, names: &std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>) -> Self {
+            LiveBackend {
+                source: SourceId::new(source),
+                names: names.clone(),
+                hold_first: None,
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl Backend for LiveBackend {
+        fn source(&self) -> SourceId {
+            self.source.clone()
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable_reason(&self) -> Option<String> {
+            None
+        }
+        fn packages(&self) -> Result<Vec<Package>> {
+            // The snapshot is taken before any wait, like a real backend reading the system.
+            let names = self.names.lock().unwrap().clone();
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0
+                && let Some(hold) = &self.hold_first
+            {
+                hold.lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("never released");
+            }
+            let source = self.source.to_string();
+            Ok(names.iter().map(|n| pkg(&source, n, "x")).collect())
+        }
+    }
+
+    type Log = std::sync::Mutex<Vec<(String, RefreshStage)>>;
+
+    fn record(log: &Log) -> impl Fn(&SourceId, &RefreshStage) + '_ {
+        move |source, stage| {
+            log.lock()
+                .unwrap()
+                .push((source.to_string(), stage.clone()))
+        }
+    }
+
+    #[test]
+    fn a_source_asked_for_during_a_pass_is_collected_again_without_waiting_for_the_others() {
+        let names = std::sync::Arc::new(std::sync::Mutex::new(vec!["old"]));
+        let (release_slow, gate) = std::sync::mpsc::channel();
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                Box::new(TestBackend {
+                    source: SourceId::new("slow"),
+                    barrier: None,
+                    panics: false,
+                    gate: Some(std::sync::Mutex::new(gate)),
+                }),
+                Box::new(LiveBackend::new("fast", &names)),
+            ],
+        );
+        let log = Log::default();
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let report = store.refresh_with_more(None, &record(&log), &|| {
+            let done_fast = log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(s, st)| s == "fast" && matches!(st, RefreshStage::Finished(_)))
+                .count();
+            if done_fast == 1 && !asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // The system changed after "fast" was collected: ask for it again.
+                *names.lock().unwrap() = vec!["new"];
+                return vec![SourceId::new("fast"), SourceId::new("nonexistent")];
+            }
+            if done_fast == 2 {
+                // Only now may the slow source finish: the extra pass did not wait for it.
+                let _ = release_slow.send(());
+            }
+            Vec::new()
+        });
+        let log = log.into_inner().unwrap();
+        let fast: Vec<_> = log.iter().filter(|(s, _)| s == "fast").collect();
+        assert_eq!(fast.len(), 4, "{log:?}");
+        assert_eq!(fast[2].1, RefreshStage::Started);
+        assert_eq!(log.last().unwrap().0, "slow", "{log:?}");
+        assert_eq!(store.search("new", 10).unwrap().len(), 1);
+        assert_eq!(store.search("old", 10).unwrap().len(), 0);
+        let sources: Vec<_> = report.sources.iter().map(|r| r.source.as_str()).collect();
+        assert_eq!(sources, ["slow", "fast"]);
+    }
+
+    #[test]
+    fn a_source_asked_for_while_it_is_being_collected_is_collected_once_more_after() {
+        let names = std::sync::Arc::new(std::sync::Mutex::new(vec!["old"]));
+        let (release, hold) = std::sync::mpsc::channel();
+        let mut backend = LiveBackend::new("s", &names);
+        backend.hold_first = Some(std::sync::Mutex::new(hold));
+        let mut store = Store::new(Index::open_in_memory().unwrap(), vec![Box::new(backend)]);
+        let log = Log::default();
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        store.refresh_with_more(None, &record(&log), &|| {
+            if !asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // The running collection already read the old state.
+                *names.lock().unwrap() = vec!["new"];
+                let _ = release.send(());
+                return vec![SourceId::new("s")];
+            }
+            Vec::new()
+        });
+        let stages: Vec<_> = log
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|(_, st)| st)
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                RefreshStage::Started,
+                RefreshStage::Finished(Outcome::Updated { packages: 1 }),
+                RefreshStage::Started,
+                RefreshStage::Finished(Outcome::Updated { packages: 1 }),
+            ]
+        );
+        assert_eq!(store.search("new", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_source_outside_the_scope_can_be_asked_for() {
+        let names = std::sync::Arc::new(std::sync::Mutex::new(vec!["one"]));
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "tool-a", "x")])),
+                Box::new(LiveBackend::new("b", &names)),
+            ],
+        );
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let only = [SourceId::new("a")];
+        let report = store.refresh_with_more(Some(&only), &|_, _| {}, &|| {
+            if asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                Vec::new()
+            } else {
+                vec![SourceId::new("b")]
+            }
+        });
+        let sources: Vec<_> = report.sources.iter().map(|r| r.source.as_str()).collect();
+        assert_eq!(sources, ["a", "b"]);
+        assert_eq!(store.search("one", 10).unwrap().len(), 1);
     }
 
     #[test]
