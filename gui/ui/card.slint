@@ -21,6 +21,10 @@ export component Card inherits Rectangle {
     background: touch.has-hover ? Theme.surface-hover : Theme.surface;
     accessible-role: button;
     accessible-label: root.data.title;
+    accessible-description: root.data.installed ? @tr("{}, installed", root.data.source) : root.data.source;
+    accessible-action-default => {
+        root.clicked(root.data.key);
+    }
 
     // visual area: the icon, or the text card panel
     Rectangle {
@@ -108,6 +112,23 @@ export component Card inherits Rectangle {
             font-size: Theme.font-marker;
             font-weight: 700;
         }
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked(root.data.key);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // focus ring
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
     }
 
     touch := TouchArea {

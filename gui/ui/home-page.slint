@@ -4,6 +4,8 @@ import { Card, CardData } from "card.slint";
 import { Row, RowData } from "row.slint";
 
 // The scrollable content: rows by source, or a grid of results while searching.
+// Size contract: all rows and results are instantiated, not virtualised. Rows are expected to
+// hold at most ~14 cards and the results grid at most ~100; larger lists need slicing in the host.
 export component HomePage inherits Rectangle {
     in property <[RowData]> rows;
     in property <[CardData]> results;

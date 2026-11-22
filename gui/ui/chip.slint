@@ -16,6 +16,11 @@ export component Chip inherits Rectangle {
     background: root.data.selected ? Theme.chip-selected : (touch.has-hover ? Theme.pill-hover : Theme.pill);
     accessible-role: button;
     accessible-label: root.data.source;
+    accessible-checkable: true;
+    accessible-checked: root.data.selected;
+    accessible-action-default => {
+        root.clicked(root.data.source);
+    }
 
     lay := VerticalLayout {
         alignment: center;
@@ -32,6 +37,23 @@ export component Chip inherits Rectangle {
             font-size: Theme.font-chip-count;
             horizontal-alignment: center;
         }
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked(root.data.source);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // focus ring
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
     }
 
     touch := TouchArea {

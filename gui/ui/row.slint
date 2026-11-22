@@ -7,6 +7,8 @@ export struct RowData {
 }
 
 // A titled row with a thin line, and as many cards as fit in `columns`.
+// Size contract: every card of `data.cards` is instantiated (those past `columns` are only
+// hidden), so rows are expected to hold at most ~14 cards. Larger lists need slicing in the host.
 export component Row inherits Rectangle {
     in property <RowData> data;
     in property <int> columns: 1;

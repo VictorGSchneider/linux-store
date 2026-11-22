@@ -11,6 +11,9 @@ component Pill inherits Rectangle {
     background: touch.has-hover ? Theme.pill-hover : Theme.pill;
     accessible-role: button;
     accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
 
     label := Text {
         text: root.text;
@@ -18,6 +21,23 @@ component Pill inherits Rectangle {
         font-size: Theme.font-button;
         vertical-alignment: center;
         horizontal-alignment: center;
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // focus ring
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
     }
 
     touch := TouchArea {
@@ -81,12 +101,22 @@ export component TopBar inherits Rectangle {
                 max-width: Theme.search-max-width;
                 border-radius: self.height / 2;
                 background: Theme.pill;
+                border-width: input.has-focus ? Theme.focus-ring-width : 0px;
+                border-color: Theme.focus-ring;
+
+                // the whole pill focuses the field; the input sits on top of it
+                TouchArea {
+                    mouse-cursor: text;
+                    clicked => {
+                        input.focus();
+                    }
+                }
 
                 input := TextInput {
                     x: 20px;
                     width: parent.width - 40px;
-                    height: Theme.font-search * 1.4;
-                    y: (parent.height - self.height) / 2;
+                    height: parent.height;
+                    vertical-alignment: center;
                     color: Theme.pill-text;
                     font-size: Theme.font-search;
                     single-line: true;
