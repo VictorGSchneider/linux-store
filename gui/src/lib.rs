@@ -4,4 +4,5 @@
 slint::include_modules!();
 
 pub mod convert;
+pub mod state;
 pub mod wiring;

@@ -120,6 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let idx = Rc::new(Cell::new(0usize));
     let mark = Rc::new(Cell::new(Instant::now()));
     let key = Rc::new(RefCell::new(String::new()));
+    let htop_key = Rc::new(RefCell::new(String::new()));
+    let runs_before = Rc::new(Cell::new(0usize));
     let failed = Rc::new(Cell::new(false));
     let timer = slint::Timer::default();
     let weak = ui.as_weak();
@@ -243,6 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(card) = ui.get_results().row_data(0)
                             && card.title == "htop"
                         {
+                            *htop_key.borrow_mut() = card.key.to_string();
                             ui.invoke_card_clicked(card.key);
                             next = true;
                         }
@@ -250,6 +253,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     10 => {
                         if ui.get_page() == Page::App && settled {
                             save(&ui, &format!("{dir2}/fake-installed.png"))?;
+                            next = true;
+                        }
+                    }
+                    11 => {
+                        // Fix round 1: operation on A (Firefox), then B (htop).
+                        ui.invoke_back();
+                        ui.invoke_card_clicked(key.borrow().as_str().into());
+                        next = true;
+                    }
+                    12 => {
+                        if ui.get_page() == Page::App
+                            && ui.get_app_page().title == "Firefox"
+                            && settled
+                        {
+                            *mode.lock().unwrap() = Mode::Hold;
+                            runs_before.set(runs.load(Ordering::SeqCst));
+                            ui.invoke_install_clicked("pacman".into());
+                            next = true;
+                        }
+                    }
+                    13 => {
+                        if ui.get_op_active() && ui.get_op_percent() == 40 && settled {
+                            // an unrelated error must not touch the running operation
+                            wiring::inject_event(&ui, store_app::Event::Error("boom".into()));
+                            assert!(ui.get_op_active(), "Event::Error must keep op-active");
+                            ui.invoke_install_clicked("pacman".into());
+                            next = true;
+                        }
+                    }
+                    14 => {
+                        if settled {
+                            assert!(ui.get_op_active());
+                            assert_eq!(
+                                runs.load(Ordering::SeqCst),
+                                runs_before.get() + 1,
+                                "the second click after the error must be ignored"
+                            );
+                            println!("error during op: still active, one run only");
+                            // click B, leave through Home, then A late answer for B arrives
+                            ui.invoke_card_clicked(htop_key.borrow().as_str().into());
+                            ui.invoke_show_home();
+                            let mut late = pkg("pacman", "htop", "late");
+                            late.installed_version = Some("3.3.0-1".into());
+                            let app = store_core::App {
+                                key: htop_key.borrow().clone(),
+                                title: "htop".into(),
+                                variants: vec![late],
+                            };
+                            wiring::inject_event(
+                                &ui,
+                                store_app::Event::AppPage(Some(store_app::AppView {
+                                    app,
+                                    installable: vec![],
+                                })),
+                            );
+                            next = true;
+                        }
+                    }
+                    15 => {
+                        if settled {
+                            assert_eq!(ui.get_page(), Page::Home, "a late AppPage must not reopen");
+                            assert!(ui.get_op_active(), "the bar stays on every page");
+                            println!("late AppPage after leaving: ignored, bar still shown");
+                            save(&ui, &format!("{dir2}/fake-late-home.png"))?;
+                            ui.invoke_card_clicked(htop_key.borrow().as_str().into());
+                            next = true;
+                        }
+                    }
+                    16 => {
+                        if ui.get_page() == Page::App
+                            && ui.get_app_page().title == "htop"
+                            && settled
+                        {
+                            assert_eq!(ui.get_op_status(), "");
+                            ui.invoke_cancel_clicked();
+                            next = true;
+                        }
+                    }
+                    17 => {
+                        if !ui.get_op_active() && settled {
+                            assert_eq!(ui.get_op_status(), "", "A's result must not show on B");
+                            println!("B page after A finished: no status");
+                            save(&ui, &format!("{dir2}/fake-b-after-a.png"))?;
+                            ui.invoke_back();
+                            ui.invoke_card_clicked(key.borrow().as_str().into());
+                            next = true;
+                        }
+                    }
+                    18 => {
+                        if ui.get_page() == Page::App
+                            && ui.get_app_page().title == "Firefox"
+                            && settled
+                        {
+                            assert_eq!(ui.get_op_status(), "cancelled");
+                            println!("A page: status {:?}", ui.get_op_status());
+                            save(&ui, &format!("{dir2}/fake-a-status.png"))?;
                             next = true;
                         }
                     }

@@ -65,9 +65,11 @@ export component AppWindow inherits Window {
                 root.chip-clicked(source);
             }
             show-installed => {
+                root.page = Page.home;
                 root.show-installed();
             }
             show-updates => {
+                root.page = Page.home;
                 root.show-updates();
             }
             show-home => {
