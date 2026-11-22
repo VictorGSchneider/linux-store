@@ -1,0 +1,119 @@
+import { Theme, TextUtil } from "theme.slint";
+
+export struct CardData {
+    key: string,
+    title: string,
+    subtitle: string,
+    source: string,
+    icon: image,
+    has-icon: bool,
+    accent: color,
+    installed: bool,
+}
+
+export component Card inherits Rectangle {
+    in property <CardData> data;
+    callback clicked(string);
+
+    width: Theme.card-width;
+    height: Theme.card-height;
+    border-radius: Theme.radius-card;
+    background: touch.has-hover ? Theme.surface-hover : Theme.surface;
+    accessible-role: button;
+    accessible-label: root.data.title;
+
+    // visual area: the icon, or the text card panel
+    Rectangle {
+        x: Theme.card-padding;
+        y: Theme.card-padding;
+        width: parent.width - 2 * Theme.card-padding;
+        height: Theme.card-visual-height;
+        border-radius: Theme.radius-visual;
+        background: root.data.has-icon ? transparent : root.data.accent;
+        clip: true;
+
+        if root.data.has-icon: Image {
+            source: root.data.icon;
+            width: Theme.icon-size;
+            height: Theme.icon-size;
+            image-fit: contain;
+        }
+        if !root.data.has-icon: VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            alignment: center;
+            Text {
+                text: TextUtil.initial(root.data.title);
+                color: Theme.on-accent;
+                font-size: Theme.font-initial;
+                font-weight: 700;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+
+            // at most two lines: the rest is clipped
+            Rectangle {
+                height: 2.3 * Theme.font-card-text;
+                clip: true;
+                Text {
+                    y: 0;
+                    width: parent.width;
+                    text: root.data.subtitle;
+                    color: Theme.on-accent;
+                    font-size: Theme.font-card-text;
+                    horizontal-alignment: center;
+                    vertical-alignment: top;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: Theme.card-padding;
+        y: Theme.card-padding + Theme.card-visual-height + 6px;
+        width: parent.width - 2 * Theme.card-padding;
+        height: 2.6 * Theme.font-card-name + Theme.font-card-source;
+        spacing: 2px;
+        alignment: start;
+        Text {
+            text: root.data.title;
+            color: Theme.text;
+            font-size: Theme.font-card-name;
+            font-weight: 600;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.data.source;
+            color: Theme.text-dim;
+            font-size: Theme.font-card-source;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // marker for installed apps
+    if root.data.installed: Rectangle {
+        x: parent.width - self.width - Theme.card-padding - 4px;
+        y: Theme.card-padding + 4px;
+        width: Theme.marker-size;
+        height: Theme.marker-size;
+        border-radius: self.width / 2;
+        background: Theme.marker;
+        Text {
+            text: @tr("✓");
+            color: Theme.marker-text;
+            font-size: Theme.font-marker;
+            font-weight: 700;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked(root.data.key);
+        }
+    }
+}

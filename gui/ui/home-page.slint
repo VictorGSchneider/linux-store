@@ -1,0 +1,69 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, CardData } from "card.slint";
+import { Row, RowData } from "row.slint";
+
+// The scrollable content: rows by source, or a grid of results while searching.
+export component HomePage inherits Rectangle {
+    in property <[RowData]> rows;
+    in property <[CardData]> results;
+    in property <bool> searching;
+    in property <bool> query-active;
+    callback card-clicked(string);
+
+    private property <length> content-width: min(self.width, Theme.content-max-width) - 2 * Theme.page-padding;
+    // as many cards as fit the width, at least one
+    private property <int> columns: max(1, Math.floor((content-width + Theme.card-gap) / (Theme.card-width + Theme.card-gap)));
+    private property <bool> show-results: root.query-active || root.results.length > 0;
+    private property <int> result-rows: Math.ceil(root.results.length / root.columns);
+
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            padding-top: 16px;
+            padding-bottom: Theme.page-padding;
+            spacing: Theme.row-gap;
+            alignment: start;
+
+            if !root.show-results: VerticalLayout {
+                spacing: Theme.row-gap;
+                for row in root.rows: HorizontalLayout {
+                    alignment: center;
+                    Row {
+                        width: root.content-width;
+                        data: row;
+                        columns: root.columns;
+                        card-clicked(key) => {
+                            root.card-clicked(key);
+                        }
+                    }
+                }
+            }
+
+            if root.show-results && root.results.length == 0: Text {
+                text: root.searching ? @tr("Searching…") : @tr("No results");
+                color: Theme.text-dim;
+                font-size: Theme.font-message;
+                horizontal-alignment: center;
+            }
+
+            if root.show-results: HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: root.content-width;
+                    height: root.result-rows * (Theme.card-height + Theme.card-gap);
+                    for card[i] in root.results: Card {
+                        x: Math.mod(i, root.columns) * (Theme.card-width + Theme.card-gap);
+                        y: Math.floor(i / root.columns) * (Theme.card-height + Theme.card-gap);
+                        data: card;
+                        clicked(key) => {
+                            root.card-clicked(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

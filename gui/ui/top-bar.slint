@@ -1,0 +1,131 @@
+import { Theme } from "theme.slint";
+import { Chip, ChipData } from "chip.slint";
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    height: Theme.pill-height;
+    width: label.preferred-width + 2 * Theme.pill-padding;
+    border-radius: self.height / 2;
+    background: touch.has-hover ? Theme.pill-hover : Theme.pill;
+    accessible-role: button;
+    accessible-label: root.text;
+
+    label := Text {
+        text: root.text;
+        color: Theme.pill-text;
+        font-size: Theme.font-button;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The fixed top area: Installeds / Updates, the search field and the source chips.
+export component TopBar inherits Rectangle {
+    in property <[ChipData]> chips;
+    in-out property <string> query <=> input.text;
+    callback search-edited(string);
+    callback chip-clicked(string);
+    callback show-installed();
+    callback show-updates();
+    callback show-home();
+
+    background: Theme.top-background;
+    preferred-height: lay.preferred-height + 2 * Theme.page-padding;
+
+    lay := VerticalLayout {
+        padding: Theme.page-padding;
+        padding-top: 16px;
+        padding-bottom: 16px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 16px;
+            Pill {
+                text: @tr("Home");
+                clicked => {
+                    root.show-home();
+                }
+            }
+
+            Pill {
+                text: @tr("Installeds");
+                clicked => {
+                    root.show-installed();
+                }
+            }
+
+            Pill {
+                text: @tr("Updates");
+                clicked => {
+                    root.show-updates();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                height: Theme.search-height;
+                min-width: 120px;
+                preferred-width: Theme.search-max-width;
+                max-width: Theme.search-max-width;
+                border-radius: self.height / 2;
+                background: Theme.pill;
+
+                input := TextInput {
+                    x: 20px;
+                    width: parent.width - 40px;
+                    height: Theme.font-search * 1.4;
+                    y: (parent.height - self.height) / 2;
+                    color: Theme.pill-text;
+                    font-size: Theme.font-search;
+                    single-line: true;
+                    accessible-label: @tr("Search");
+                    edited => {
+                        root.search-edited(self.text);
+                    }
+                }
+
+                if input.text == "": Text {
+                    x: 20px;
+                    width: parent.width - 40px;
+                    text: @tr("search");
+                    color: Theme.pill-text-dim;
+                    font-size: Theme.font-search;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Chips scroll sideways when they do not fit.
+        Flickable {
+            height: Theme.chip-height;
+            content-width: max(self.width, chip-row.preferred-width);
+            interactive: true;
+
+            chip-row := HorizontalLayout {
+                // centered when it fits
+                width: max(parent.width, self.preferred-width);
+                alignment: center;
+                spacing: 10px;
+                for chip in root.chips: Chip {
+                    data: chip;
+                    clicked(source) => {
+                        root.chip-clicked(source);
+                    }
+                }
+            }
+        }
+    }
+}

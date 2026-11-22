@@ -1,17 +1,60 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Theme, TextUtil } from "theme.slint";
+import { CardData } from "card.slint";
+import { ChipData } from "chip.slint";
+import { RowData } from "row.slint";
+import { TopBar } from "top-bar.slint";
+import { HomePage } from "home-page.slint";
+
+export { CardData, ChipData, RowData, TextUtil }
 
 export component AppWindow inherits Window {
-    in-out property <int> counter: 42;
-    callback request-increase-value();
-    VerticalBox {
-        Text {
-            text: "Counter: \{root.counter}";
+    in property <[ChipData]> chips;
+    in property <[RowData]> rows;
+    in property <[CardData]> results;
+    in property <bool> searching;
+    in-out property <string> query;
+    callback search-edited(string);
+    callback chip-clicked(string);
+    callback card-clicked(string);
+    callback show-installed();
+    callback show-updates();
+    callback show-home();
+
+    title: @tr("Linux Store");
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    min-width: 480px;
+    min-height: 400px;
+    background: Theme.background;
+
+    VerticalLayout {
+        TopBar {
+            chips: root.chips;
+            query <=> root.query;
+            search-edited(text) => {
+                root.search-edited(text);
+            }
+            chip-clicked(source) => {
+                root.chip-clicked(source);
+            }
+            show-installed => {
+                root.show-installed();
+            }
+            show-updates => {
+                root.show-updates();
+            }
+            show-home => {
+                root.show-home();
+            }
         }
 
-        Button {
-            text: "Increase value";
-            clicked => {
-                root.request-increase-value();
+        HomePage {
+            rows: root.rows;
+            results: root.results;
+            searching: root.searching;
+            query-active: root.query != "";
+            card-clicked(key) => {
+                root.card-clicked(key);
             }
         }
     }

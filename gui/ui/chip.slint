@@ -1,0 +1,43 @@
+import { Theme } from "theme.slint";
+
+export struct ChipData {
+    source: string,
+    count: int,
+    selected: bool,
+}
+
+export component Chip inherits Rectangle {
+    in property <ChipData> data;
+    callback clicked(string);
+
+    height: Theme.chip-height;
+    width: max(lay.preferred-width + 24px, 64px);
+    border-radius: self.height / 2;
+    background: root.data.selected ? Theme.chip-selected : (touch.has-hover ? Theme.pill-hover : Theme.pill);
+    accessible-role: button;
+    accessible-label: root.data.source;
+
+    lay := VerticalLayout {
+        alignment: center;
+        Text {
+            text: root.data.source;
+            color: Theme.pill-text;
+            font-size: Theme.font-chip;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: @tr("{} packages", root.data.count);
+            color: root.data.selected ? Theme.pill-text : Theme.pill-text-dim;
+            font-size: Theme.font-chip-count;
+            horizontal-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked(root.data.source);
+        }
+    }
+}
