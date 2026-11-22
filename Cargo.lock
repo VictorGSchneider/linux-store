@@ -2908,6 +2908,9 @@ dependencies = [
  "png",
  "slint",
  "slint-build",
+ "store-app",
+ "store-core",
+ "store-system",
 ]
 
 [[package]]

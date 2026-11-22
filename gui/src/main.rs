@@ -1,31 +1,39 @@
 // Prevent console window in addition to Slint window in Windows release builds when, e.g., starting the app via file manager. Ignored on other platforms.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::error::Error;
+use std::process::ExitCode;
+use std::sync::Arc;
 
-#[cfg(debug_assertions)]
-mod sample;
+use linux_store::{AppWindow, wiring};
+use slint::ComponentHandle;
+use store_core::{Host, SourceId};
+use store_system::{backends, default_db_path, installer};
 
-slint::include_modules!();
-
-/// The first character of a name, uppercased, for text cards.
-fn initial(name: &str) -> String {
-    name.chars()
-        .find(|c| !c.is_whitespace())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default()
+fn main() -> ExitCode {
+    let Some(db_path) = default_db_path() else {
+        eprintln!("linux-store: cannot find a cache directory (set HOME or XDG_CACHE_HOME)");
+        return ExitCode::FAILURE;
+    };
+    let config = store_app::EngineConfig {
+        db_path,
+        backends: backends(),
+        installer: Arc::new(installer()),
+        installable: vec![SourceId::new("pacman")],
+        host: Host::detect(),
+    };
+    match run(config) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("linux-store: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn run(config: store_app::EngineConfig) -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
-    ui.global::<TextUtil>()
-        .on_initial(|name| initial(name.as_str()).into());
-
-    // Sample data to see the layout; removed when the window is wired to the engine.
-    #[cfg(debug_assertions)]
-    sample::fill(&ui);
-
+    wiring::install(&ui, config)?;
     ui.run()?;
-
+    wiring::shutdown();
     Ok(())
 }

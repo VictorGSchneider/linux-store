@@ -10,7 +10,7 @@ Cargo workspace: `core/` (package `store-core`; not named `core`, which would co
 `core`), `backends/pacman/`, `backends/aur/` and `backends/flatpak/` (packages
 `store-backend-pacman`, `-aur`, `-flatpak`), `cli/` (package `store-cli`, binary
 `store`), `protocol/` (`store-protocol`), `helper/` (`store-helper`, the only code that runs as
-root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/` and `gui/` (the Slint app).
+root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/`, `app/` (`store-app`, the GUI engine), `system/` and `gui/` (the Slint app: `lib.rs` with `convert` and `wiring`, thin `main.rs`).
 Planned: more `backends/*`.
 Run the core's tests with `cargo test --workspace --features store-core/testing`.
 
