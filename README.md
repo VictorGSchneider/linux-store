@@ -11,11 +11,12 @@ and later drivers, firmware and programming-language toolchains.
 Think Microsoft Store, App Store or Play Store, but open, light, and not tied to a
 single package format.
 
-> **Status: early development.** The core, the search index and read-only pacman, AUR
-> and Flatpak backends work and can be tried from the `store` command line (see below).
-> A privileged helper can install, remove and upgrade pacman packages (see below, and note
-> that its real-password check has not been done yet); the GUI is still a placeholder window.
-> See [Roadmap](#roadmap).
+> **Status: early development.** The core, the search index and the pacman, AUR and Flatpak
+> backends work and can be tried from the `store` command line (see below). A privileged helper
+> installs, removes and upgrades pacman packages (its real-password check has not been done yet).
+> The [GUI](#gui) has a home page, search, source chips, one page per app with one install
+> button per source, install and remove with progress and cancel (pacman only), Installeds and
+> Updates. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -67,7 +68,8 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 
 1. `core`, the SQLite index and the pacman backend, with a test CLI
 2. AUR and Flatpak backends (read-only: done)
-3. The Slint GUI: search, app pages, install/remove, updates
+3. The Slint GUI: home, search, app pages, install/remove (pacman), Installeds and Updates: done;
+   categories, sidebar, settings, Flatpak and AUR install: next
 4. Privileged helper (polkit): written and tested with fixtures, awaiting the manual check
 5. apt and dnf backends
 6. Snap, AppImage, firmware (fwupd), drivers, language package managers
@@ -85,9 +87,36 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 | `installers/pkexec/` | `Installer` implementation that runs the helper through `pkexec` |
 | `packaging/` | The polkit policy and the dev install and check scripts |
 | `cli/` | `store` command line: `refresh`, `search`, `installed`, `install`, `remove`, `upgrade` |
-| `gui/` | The Slint application |
-| `docs/` | Design documents |
+| `appstream/` | `store-appstream`: AppStream parsing and app/package matching |
+| `system/` | `store-system`: the real backends and installer, shared by CLI and GUI |
+| `app/` | `store-app`: the `Engine` that runs the index, searches, icons and operations off the UI thread |
+| `gui/` | The Slint application (`linux_store` library, binary and headless examples) |
+| `docs/` | Design documents and screenshots |
 | `legacy/` | The original bash/yad `stoa-store`, kept as reference only |
+
+## GUI
+
+<p align="center"><img src="docs/screenshots/home.png" width="720" alt="Home page with a row per source"></p>
+
+The home page shows a row of apps per source and a chip per source with its package count; the
+search box looks in all sources at once. Opening an app shows one install button per source, in the
+order of your host (here pacman, then Flatpak):
+
+<p align="center"><img src="docs/screenshots/app-page.png" width="720" alt="App page with one button per source"></p>
+
+Installeds and Updates are lists of cards (this screenshot uses fake data, not a real system):
+
+<p align="center"><img src="docs/screenshots/installeds.png" width="600" alt="Installeds list"></p>
+
+What works: search, chips, app pages, install and remove for pacman packages through the helper
+(progress, cancel, a dismissed password dialog returns to idle), Installeds, Updates (pacman only),
+a narrow layout. What does not yet: the Flatpak and AUR install buttons are disabled, and there are
+no categories, sidebar, settings or trending yet (rounds 2 and later). Design and plan:
+[`docs/2026-11-21-gui-design.md`](docs/2026-11-21-gui-design.md) and
+[`docs/2026-11-21-gui-round1-plan.md`](docs/2026-11-21-gui-round1-plan.md). To try installing from
+the GUI follow [`packaging/manual-gui-check.md`](packaging/manual-gui-check.md). The first start
+builds the index (about 15 seconds, mostly the AUR download); run it with one of the safe commands
+in the next section.
 
 ## Build and run
 
