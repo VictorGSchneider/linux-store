@@ -37,5 +37,6 @@ escritas retroativamente a partir do `git log` e dos chats; o commit entre parê
 - Estado de página e operação puro: erros não mexem na operação e respostas de páginas antigas são descartadas (416767a).
 - Core: `Catalog` lê um snapshot e o refresh aceita fontes a recoletar (ae249eb); botões esperam o reload pós-operação (88e6a3c).
 - CI da GUI compila todos os alvos e roda os testes da GUI (08895b1); capturas do README refeitas (7684d63).
-- Branch `worktree-gui-design`: 41 commits à frente da `main`, ainda não fundida.
+- Branch `worktree-gui-design` fundida na `main` pelo PR #6 (ab93f6a); worktree e branch locais removidas.
+- PR #7 (diário, erros, decisões, loops e painel) fundido.
 - Adicionados loops de trabalho e documentação contínua (este diário, `errors.md`, `decisions.md`, `STATUS.md`, painel HTML).

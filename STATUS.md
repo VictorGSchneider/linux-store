@@ -15,7 +15,7 @@ Atualizado em 2026-11-22. Painel: [`docs/log/dashboard.html`](docs/log/dashboard
 | P2 | Backends AUR e Flatpak (leitura) | 4/4 | fundido | 2026-11-20 |
 | P3 | Helper privilegiado (pkexec) | 6/6 | fundido (PR #4) | 2026-11-20 a 2026-11-21 |
 | P4 | Minors das etapas 1 a 3 e busca por fonte | 1/1 | fundido (PR #5) | 2026-11-21 |
-| P5 | GUI Slint, rodada 1 | 17/17 | pronto, não fundido (41 commits) | 2026-11-21 a 2026-11-22 |
+| P5 | GUI Slint, rodada 1 | 17/17 | fundido (PR #6) | 2026-11-21 a 2026-11-22 |
 | P6 | Backends apt e dnf, adaptador PackageKit | 0/0 | não planejado |  |
 | P7 | Snap, AppImage, firmware, drivers, AUR com compilação | 0/0 | não planejado |  |
 
@@ -24,4 +24,4 @@ Atualizado em 2026-11-22. Painel: [`docs/log/dashboard.html`](docs/log/dashboard
 - Latência da busca com prefixo de 3 letras não medida
 - Kernel e bootloader fora do conjunto protegido do helper e IgnorePkg em nomes explícitos do install: não verificados
 - Cópia privada do banco para o upgrade poder ser cancelado depois do refresh
-- Fundir a branch worktree-gui-design (PR, CI verde, merge sem squash)
+- Rodar a GUI na máquina de desenvolvimento e conferir o roteiro de verificação manual (docs/)
