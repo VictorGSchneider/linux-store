@@ -1,0 +1,48 @@
+import { ProgressIndicator } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { PillButton } from "pill-button.slint";
+
+// Shown at the bottom of the window while an install or remove runs: the message, a progress
+// bar (indeterminate without a percentage) and Cancel. Leaving the app page keeps it visible.
+export component OperationBar inherits Rectangle {
+    in property <string> message;
+    // 0..100, or -1 when the operation reports no percentage
+    in property <int> percent: -1;
+    callback cancel-clicked();
+
+    background: Theme.top-background;
+    preferred-height: lay.preferred-height;
+
+    lay := HorizontalLayout {
+        padding: 12px;
+        padding-left: Theme.page-padding;
+        padding-right: Theme.page-padding;
+        spacing: 16px;
+        alignment: stretch;
+
+        VerticalLayout {
+            spacing: 6px;
+            alignment: center;
+            Text {
+                text: root.message;
+                color: Theme.text;
+                font-size: Theme.font-body;
+                overflow: elide;
+                accessible-role: text;
+            }
+
+            ProgressIndicator {
+                progress: root.percent >= 0 ? clamp(root.percent, 0, 100) / 100 : 0;
+                indeterminate: root.percent < 0;
+            }
+        }
+
+        PillButton {
+            text: @tr("Cancel");
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.cancel-clicked();
+            }
+        }
+    }
+}

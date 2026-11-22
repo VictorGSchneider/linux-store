@@ -13,6 +13,8 @@ store-system = { path = "../system" }
 
 [dev-dependencies]
 png = "0.18"
+store-core = { path = "../core", features = ["testing"] }
+store-protocol = { path = "../protocol" }
 
 [build-dependencies]
 slint-build = "1.19.0"

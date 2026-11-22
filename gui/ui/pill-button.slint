@@ -1,0 +1,60 @@
+import { Theme } from "theme.slint";
+
+// A pill-shaped button: Tab-reachable with a focus ring, activates with Enter or Space.
+// While `enabled` is false it is dimmed, ignores clicks and is skipped by Tab.
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <string> description;
+    in property <bool> enabled: true;
+    // a quieter look, for destructive actions
+    in property <bool> subdued: false;
+    callback clicked();
+
+    height: Theme.pill-height;
+    width: label.preferred-width + 2 * Theme.pill-padding;
+    border-radius: self.height / 2;
+    background: !root.enabled ? Theme.surface : (root.subdued ? Theme.remove : (touch.has-hover ? Theme.pill-hover : Theme.pill));
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    label := Text {
+        text: root.text;
+        color: root.enabled ? Theme.pill-text : Theme.disabled-text;
+        font-size: Theme.font-button;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // focus ring
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}

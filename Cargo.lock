@@ -2910,6 +2910,7 @@ dependencies = [
  "slint-build",
  "store-app",
  "store-core",
+ "store-protocol",
  "store-system",
 ]
 

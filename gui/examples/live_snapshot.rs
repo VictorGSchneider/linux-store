@@ -4,21 +4,24 @@
 //! XDG_CACHE_HOME=/some/tmp SLINT_BACKEND=headless cargo run -p linux-store \
 //!     --example live_snapshot --features slint/mcp -- OUT_DIR [QUERY] [SOURCE]
 //!
-//! Writes OUT_DIR/{home,search,filtered}.png. Does nothing that installs.
+//! Writes OUT_DIR/{home,search,filtered,page,page-narrow,installed-page}.png. Operations use a FAKE
+//! installer (never the real one) and none is started.
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use linux_store::{AppWindow, wiring};
-use slint::ComponentHandle;
-use store_core::{Host, SourceId};
+use slint::{ComponentHandle, Model};
+use store_core::testing::FakeInstaller;
+use store_core::{Host, InstallError, SourceId};
 
 enum Step {
     WaitRefresh,
     Settle(Instant, &'static str),
     Search(Instant),
     Filter(Instant),
+    Page(Instant, &'static str),
     Done,
 }
 
@@ -37,13 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = args.next().expect("output directory");
     let query = args.next().unwrap_or_else(|| "firefox".into());
     let source = args.next().unwrap_or_else(|| "flatpak".into());
+    let installed_query = args.next().unwrap_or_else(|| "bash".into());
     std::fs::create_dir_all(&dir)?;
     let db_path = store_system::default_db_path().expect("cache dir");
     println!("index: {}", db_path.display());
     let config = store_app::EngineConfig {
         db_path,
         backends: store_system::backends(),
-        installer: Arc::new(store_system::installer()),
+        installer: Arc::new(FakeInstaller::new(vec![], Err(InstallError::Dismissed))),
         installable: vec![SourceId::new("pacman")],
         host: Host::detect(),
     };
@@ -97,7 +101,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Step::Filter(t) => {
                         if t.elapsed() > wait {
                             save(&ui, &format!("{dir2}/filtered.png"))?;
-                            *step = Step::Done;
+                            ui.invoke_chip_clicked(source.as_str().into());
+                            *step = Step::Page(Instant::now(), "page");
+                        }
+                    }
+                    Step::Page(t, name) => {
+                        if t.elapsed() > wait {
+                            let name = *name;
+                            if name == "page" {
+                                // open the first search result (the filter is off again)
+                                let first = ui.get_results().row_data(0).ok_or("no results")?;
+                                println!("opening {} ({})", first.title, first.key);
+                                ui.invoke_card_clicked(first.key);
+                                *step = Step::Page(Instant::now(), "page-open");
+                            } else if name == "page-open" {
+                                save(&ui, &format!("{dir2}/page.png"))?;
+                                ui.window().set_size(slint::PhysicalSize::new(480, 800));
+                                *step = Step::Page(Instant::now(), "page-narrow");
+                            } else if name == "page-narrow" {
+                                save(&ui, &format!("{dir2}/page-narrow.png"))?;
+                                ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+                                ui.invoke_back();
+                                ui.set_query(installed_query.as_str().into());
+                                ui.invoke_search_edited(installed_query.as_str().into());
+                                *step = Step::Page(Instant::now(), "installed-search");
+                            } else if name == "installed-search" {
+                                let first = ui.get_results().row_data(0).ok_or("no results")?;
+                                println!("opening {} ({})", first.title, first.key);
+                                ui.invoke_card_clicked(first.key);
+                                *step = Step::Page(Instant::now(), "installed-open");
+                            } else {
+                                save(&ui, &format!("{dir2}/installed-page.png"))?;
+                                *step = Step::Done;
+                            }
                         }
                     }
                     Step::Done => {

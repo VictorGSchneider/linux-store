@@ -4,8 +4,16 @@ import { ChipData } from "chip.slint";
 import { RowData } from "row.slint";
 import { TopBar } from "top-bar.slint";
 import { HomePage } from "home-page.slint";
+import { AppPage, AppPageData, SourceButtonData } from "app-page.slint";
+import { OperationBar } from "operation-bar.slint";
 
-export { CardData, ChipData, RowData, TextUtil }
+export { CardData, ChipData, RowData, TextUtil, AppPageData, SourceButtonData }
+
+// Which page shows below the top bar. Home keeps its rows and results while the app page shows.
+export enum Page {
+    home,
+    app,
+}
 
 export component AppWindow inherits Window {
     in property <[ChipData]> chips;
@@ -13,12 +21,29 @@ export component AppWindow inherits Window {
     in property <[CardData]> results;
     in property <bool> searching;
     in-out property <string> query;
+    in-out property <Page> page: Page.home;
+    in property <AppPageData> app-page;
+    // an install or remove is running
+    in property <bool> op-active;
+    in property <string> op-message;
+    // 0..100, or -1 when the operation reports no percentage
+    in property <int> op-percent: -1;
+    // the last operation's result or error, shown on the app page
+    in property <string> op-status;
+    in property <bool> op-status-error;
+    // the app a click asked for is not in the catalog (any more): a short note on the home page
+    in property <bool> app-missing;
     callback search-edited(string);
     callback chip-clicked(string);
     callback card-clicked(string);
     callback show-installed();
     callback show-updates();
     callback show-home();
+    callback back();
+    callback install-clicked(string);
+    callback remove-clicked(string);
+    callback cancel-clicked();
+    callback open-link(string);
 
     title: @tr("Linux Store");
     preferred-width: 1200px;
@@ -32,9 +57,11 @@ export component AppWindow inherits Window {
             chips: root.chips;
             query <=> root.query;
             search-edited(text) => {
+                root.page = Page.home;
                 root.search-edited(text);
             }
             chip-clicked(source) => {
+                root.page = Page.home;
                 root.chip-clicked(source);
             }
             show-installed => {
@@ -44,17 +71,53 @@ export component AppWindow inherits Window {
                 root.show-updates();
             }
             show-home => {
+                root.page = Page.home;
                 root.show-home();
             }
         }
 
-        HomePage {
+        if root.page == Page.home && root.app-missing: Text {
+            text: @tr("This app is no longer in the catalog.");
+            color: Theme.text-dim;
+            font-size: Theme.font-body;
+            horizontal-alignment: center;
+            accessible-role: text;
+        }
+
+        if root.page == Page.home: HomePage {
             rows: root.rows;
             results: root.results;
             searching: root.searching;
             query-active: root.query != "";
             card-clicked(key) => {
                 root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.app: AppPage {
+            data: root.app-page;
+            busy: root.op-active;
+            status: root.op-status;
+            status-error: root.op-status-error;
+            back => {
+                root.back();
+            }
+            install-clicked(source) => {
+                root.install-clicked(source);
+            }
+            remove-clicked(source) => {
+                root.remove-clicked(source);
+            }
+            open-link(url) => {
+                root.open-link(url);
+            }
+        }
+
+        if root.op-active: OperationBar {
+            message: root.op-message;
+            percent: root.op-percent;
+            cancel-clicked => {
+                root.cancel-clicked();
             }
         }
     }

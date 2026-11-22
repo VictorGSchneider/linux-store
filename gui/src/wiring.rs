@@ -6,11 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use store_app::{Command, Engine, EngineConfig, Event};
+use store_app::{AppView, Command, Engine, EngineConfig, Event, OpState};
 use store_core::{App, Row, SourceId};
 
 use crate::convert;
-use crate::{AppWindow, CardData, TextUtil};
+use crate::{AppWindow, CardData, Page, TextUtil};
 
 /// Cards per home row (the row component instantiates every card it gets).
 const PER_ROW: usize = 14;
@@ -36,6 +36,14 @@ struct State {
     row_icons: HashMap<String, String>,
     result_icons: HashMap<String, String>,
     refreshes_done: usize,
+    /// The app the user most recently asked to open; an `AppPage` for another key is stale.
+    open_key: Option<String>,
+    /// The app the page shows (installs and removals act on it).
+    page_key: Option<String>,
+    /// The icon path of the page's app, to fill in when the image arrives.
+    page_icon: Option<String>,
+    /// An install or remove was sent and has not finished: clicks are ignored meanwhile.
+    op_pending: bool,
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
@@ -71,6 +79,10 @@ pub fn install(ui: &AppWindow, config: EngineConfig) -> Result<(), store_core::E
         row_icons: HashMap::new(),
         result_icons: HashMap::new(),
         refreshes_done: 0,
+        open_key: None,
+        page_key: None,
+        page_icon: None,
+        op_pending: false,
     };
     state.engine.send(Command::Chips);
     state.send_home();
@@ -96,7 +108,57 @@ pub fn install(ui: &AppWindow, config: EngineConfig) -> Result<(), store_core::E
             with_state(|s| s.search_edited(&ui, ""));
         }
     });
+    let weak = ui.as_weak();
+    ui.on_card_clicked(move |key| {
+        if let Some(ui) = weak.upgrade() {
+            with_state(|s| s.card_clicked(&ui, key.as_str()));
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_back(move || {
+        if let Some(ui) = weak.upgrade() {
+            with_state(|s| s.back(&ui));
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_install_clicked(move |source| {
+        if let Some(ui) = weak.upgrade() {
+            with_state(|s| s.operation_clicked(&ui, source.as_str(), false));
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_remove_clicked(move |source| {
+        if let Some(ui) = weak.upgrade() {
+            with_state(|s| s.operation_clicked(&ui, source.as_str(), true));
+        }
+    });
+    ui.on_cancel_clicked(|| {
+        with_state(|s| s.engine.send(Command::CancelOperation));
+    });
+    ui.on_open_link(|url| open_link(url.as_str()));
     Ok(())
+}
+
+/// Opens `url` in the user's browser with `xdg-open`, only for `http://` and `https://` URLs.
+/// No shell, no waiting (a thread reaps the child), all stdio closed.
+pub fn open_link(url: &str) {
+    if !convert::is_openable_url(url) {
+        return;
+    }
+    let spawned = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => eprintln!("linux-store: cannot run xdg-open: {e}"),
+    }
 }
 
 /// Drops the engine (stopping its threads). Call after the event loop ends.
@@ -142,7 +204,16 @@ impl State {
                 if self.searching() {
                     self.run_search(ui);
                 }
+                // An operation refreshes its source: reload the open page (its status stays).
+                if ui.get_page() == Page::App
+                    && let Some(key) = self.page_key.clone()
+                {
+                    self.open_key = Some(key.clone());
+                    self.engine.send(Command::Open { key });
+                }
             }
+            Event::AppPage(view) => self.show_page(ui, view),
+            Event::Operation(state) => self.operation_event(ui, state),
             Event::Icon {
                 path,
                 image: Some(rgba),
@@ -158,8 +229,12 @@ impl State {
             Event::Error(message) => {
                 eprintln!("linux-store: {message}");
                 ui.set_searching(false);
+                // Never stay in the operation state.
+                if ui.get_op_active() || self.op_pending {
+                    self.finish_operation(ui, Err(message));
+                }
             }
-            // Refresh progress, app pages, operations, installed and updates: later tasks.
+            // Refresh progress, installed and updates: later tasks.
             _ => {}
         }
     }
@@ -223,6 +298,119 @@ impl State {
             }
         }
         apply(ui.get_results(), &self.result_icons);
+        if self.page_icon.as_deref() == Some(path) {
+            let mut page = ui.get_app_page();
+            page.icon = image.clone();
+            page.has_icon = true;
+            ui.set_app_page(page);
+        }
+    }
+
+    fn card_clicked(&mut self, ui: &AppWindow, key: &str) {
+        if self.page_key.as_deref() != Some(key) {
+            ui.set_op_status("".into());
+            ui.set_op_status_error(false);
+        }
+        ui.set_app_missing(false);
+        self.open_key = Some(key.to_string());
+        self.engine.send(Command::Open {
+            key: key.to_string(),
+        });
+    }
+
+    fn show_page(&mut self, ui: &AppWindow, view: Option<AppView>) {
+        // Only the app asked for last: the user may have clicked another one meanwhile, or left.
+        let Some(requested) = self.open_key.clone() else {
+            return;
+        };
+        let Some(view) = view else {
+            self.page_key = None;
+            ui.set_page(Page::Home);
+            ui.set_app_missing(true);
+            return;
+        };
+        if view.app.key != requested {
+            return;
+        }
+        let pv = convert::page_view(&view);
+        let icon = pv
+            .icon_path
+            .as_deref()
+            .and_then(|p| self.images.get(p).cloned());
+        if let Some(path) = &pv.icon_path
+            && icon.is_none()
+            && self.requested.insert(path.clone())
+        {
+            self.engine.send(Command::LoadIcon {
+                path: path.clone(),
+                side: ICON_SIDE,
+            });
+        }
+        self.page_icon = pv.icon_path.clone();
+        self.page_key = Some(pv.key.clone());
+        ui.set_app_page(convert::page_data(&pv, icon));
+        ui.set_app_missing(false);
+        ui.set_page(Page::App);
+    }
+
+    fn back(&mut self, ui: &AppWindow) {
+        // Leaving the page does not cancel a running operation.
+        self.open_key = None;
+        self.page_key = None;
+        self.page_icon = None;
+        ui.set_page(Page::Home);
+    }
+
+    fn operation_clicked(&mut self, ui: &AppWindow, source: &str, remove: bool) {
+        if ui.get_op_active() || self.op_pending {
+            return;
+        }
+        let Some(key) = self.page_key.clone() else {
+            return;
+        };
+        self.op_pending = true;
+        let source = SourceId::new(source);
+        self.engine.send(if remove {
+            Command::Remove { key, source }
+        } else {
+            Command::Install { key, source }
+        });
+    }
+
+    fn operation_event(&mut self, ui: &AppWindow, state: OpState) {
+        match state {
+            OpState::Started(message) => {
+                self.op_pending = true;
+                ui.set_op_status("".into());
+                ui.set_op_status_error(false);
+                ui.set_op_message(
+                    convert::sanitize_text(&message, convert::MAX_MESSAGE_CHARS).into(),
+                );
+                ui.set_op_percent(-1);
+                ui.set_op_active(true);
+            }
+            OpState::Progress { message, percent } => {
+                ui.set_op_message(
+                    convert::sanitize_text(&message, convert::MAX_MESSAGE_CHARS).into(),
+                );
+                ui.set_op_percent(percent.map_or(-1, |p| i32::from(p.min(100))));
+            }
+            OpState::Finished(result) => self.finish_operation(ui, result),
+        }
+    }
+
+    /// Ends the operation state on every path (also a refusal that never started).
+    fn finish_operation(&mut self, ui: &AppWindow, result: Result<String, String>) {
+        self.op_pending = false;
+        ui.set_op_active(false);
+        ui.set_op_percent(-1);
+        ui.set_op_message("".into());
+        let (text, is_error) = match result {
+            Ok(summary) => (summary, false),
+            Err(message) => (message, true),
+        };
+        ui.set_op_status(convert::sanitize_text(&text, convert::MAX_MESSAGE_CHARS).into());
+        ui.set_op_status_error(is_error);
     }
 
     fn search_edited(&mut self, ui: &AppWindow, text: &str) {
