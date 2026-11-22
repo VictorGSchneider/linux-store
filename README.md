@@ -87,7 +87,7 @@ The full reasoning is in the [design document](docs/2026-11-18-linux-store-desig
 | `installers/pkexec/` | `Installer` implementation that runs the helper through `pkexec` |
 | `packaging/` | The polkit policy and the dev install and check scripts |
 | `cli/` | `store` command line: `refresh`, `search`, `installed`, `install`, `remove`, `upgrade` |
-| `appstream/` | `store-appstream`: AppStream parsing and app/package matching |
+| `appstream/` | `store-appstream`: AppStream catalog parsing (the app/package matching is in `core/src/index.rs`) |
 | `system/` | `store-system`: the real backends and installer, shared by CLI and GUI |
 | `app/` | `store-app`: the `Engine` that runs the index, searches, icons and operations off the UI thread |
 | `gui/` | The Slint application (`linux_store` library, binary and headless examples) |
@@ -185,7 +185,7 @@ Every push to `main` and every pull request runs (see `.github/workflows/`):
 
 - `cargo fmt --check`
 - `cargo clippy -D warnings` and the full test suite on Arch Linux
-- a compile check of the Slint GUI (it is never run in CI)
+- a compile check of every target of the Slint GUI (library, binary, examples) and its unit tests (the window is never opened in CI)
 - a weekly and per-dependency-change `cargo audit`; Dependabot proposes weekly updates
 
 Run the same checks locally before pushing:
@@ -194,6 +194,8 @@ Run the same checks locally before pushing:
 cargo fmt --all --check
 cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings
 cargo test --workspace --exclude linux-store --features store-core/testing
+cargo check --locked -p linux-store --all-targets
+cargo test --locked -p linux-store
 ```
 
 ## Contributing

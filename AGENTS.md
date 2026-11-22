@@ -11,7 +11,8 @@ Cargo workspace: `core/` (package `store-core`; not named `core`, which would co
 `store-backend-pacman`, `-aur`, `-flatpak`), `cli/` (package `store-cli`, binary
 `store`), `protocol/` (`store-protocol`), `helper/` (`store-helper`, the only code that runs as
 root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/`, `appstream/`
-(`store-appstream`, AppStream parsing and the app/package matching), `system/` (`store-system`: the
+(`store-appstream`, AppStream parsing; the app/package matching is `rebuild_links_in` in
+`core/src/index.rs`), `system/` (`store-system`: the
 real backends and installer, shared by CLI and GUI), `app/` (`store-app`: the `Engine`, which owns
 the index and the installer and runs everything slow on its own threads: query, refresh, operations
 and two icon decoders; the UI sends `Command`s and gets `Event`s) and `gui/` (package
@@ -75,9 +76,11 @@ npx skills add slint-ui/ai-plugins --skill slint
 
 ## Before you push
 
-CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings`, the tests and a GUI compile check.
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings`, the tests, and for the GUI
+a compile check of all targets (examples included) and its unit tests.
 Run the same locally: `cargo fmt --all --check`, `cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings`,
-`cargo test --workspace --exclude linux-store --features store-core/testing`.
+`cargo test --workspace --exclude linux-store --features store-core/testing`,
+`cargo check --locked -p linux-store --all-targets`, `cargo test --locked -p linux-store`.
 
 ## Documentation
 
