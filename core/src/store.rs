@@ -63,8 +63,11 @@ impl Store {
 
     /// Like [`Store::refresh`], but limited to the sources in `only` (when given; names that match
     /// no backend are ignored) and reporting progress. The slow `Backend::packages()` calls run
-    /// in parallel, one thread per source; the index is written one source at a time, in backend
-    /// order, on the calling thread. `progress` may be called from several threads.
+    /// in parallel, one thread per source. Each source is written to the index and reported as
+    /// finished as soon as its own collection is done, whatever the order of the backends; the
+    /// writes happen one at a time on the calling thread. `RefreshReport.sources` is in backend
+    /// order. `progress` is only ever called on the calling thread, and it
+    /// must not panic.
     pub fn refresh_with(
         &mut self,
         only: Option<&[SourceId]>,
@@ -81,41 +84,59 @@ impl Store {
         for (source, _) in &in_scope {
             progress(source, &RefreshStage::Started);
         }
-        let mut sources = Vec::with_capacity(in_scope.len());
+        let mut outcomes: Vec<Option<Outcome>> = vec![None; in_scope.len()];
+        let mut pending = 0;
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            let handles: Vec<_> = in_scope
-                .iter()
-                .map(|(_, backend)| {
-                    backend
-                        .is_available()
-                        .then(|| scope.spawn(move || backend.packages().map(first_of_each_name)))
-                })
-                .collect();
-            for ((source, backend), handle) in in_scope.iter().zip(handles) {
-                let outcome = match handle {
-                    None => Outcome::Unavailable {
+            for (i, (source, backend)) in in_scope.iter().enumerate() {
+                if backend.is_available() {
+                    pending += 1;
+                    let tx = tx.clone();
+                    scope.spawn(move || {
+                        let collected =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                backend.packages().map(first_of_each_name)
+                            }));
+                        // The receiver outlives every sender, so this cannot fail.
+                        let _ = tx.send((i, collected));
+                    });
+                } else {
+                    let outcome = Outcome::Unavailable {
                         reason: backend.unavailable_reason(),
-                    },
-                    Some(handle) => match handle.join() {
-                        Err(_) => Outcome::Failed("backend panicked".to_string()),
-                        Ok(collected) => match collected.and_then(|packages| {
-                            index
-                                .replace_source(source, &packages)
-                                .map(|()| packages.len())
-                        }) {
-                            Ok(packages) => Outcome::Updated { packages },
-                            Err(e) => Outcome::Failed(failure_message(&e)),
-                        },
+                    };
+                    progress(source, &RefreshStage::Finished(outcome.clone()));
+                    outcomes[i] = Some(outcome);
+                }
+            }
+            drop(tx);
+            for _ in 0..pending {
+                let Ok((i, collected)) = rx.recv() else { break };
+                let source = &in_scope[i].0;
+                let outcome = match collected {
+                    Err(_) => Outcome::Failed("backend panicked".to_string()),
+                    Ok(collected) => match collected.and_then(|packages| {
+                        index
+                            .replace_source(source, &packages)
+                            .map(|()| packages.len())
+                    }) {
+                        Ok(packages) => Outcome::Updated { packages },
+                        Err(e) => Outcome::Failed(failure_message(&e)),
                     },
                 };
                 progress(source, &RefreshStage::Finished(outcome.clone()));
-                sources.push(SourceReport {
-                    source: source.clone(),
-                    outcome,
-                });
+                outcomes[i] = Some(outcome);
             }
         });
-        RefreshReport { sources }
+        RefreshReport {
+            sources: in_scope
+                .into_iter()
+                .zip(outcomes)
+                .map(|((source, _), outcome)| SourceReport {
+                    source,
+                    outcome: outcome.expect("every source in scope gets an outcome"),
+                })
+                .collect(),
+        }
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Package>> {
@@ -368,6 +389,7 @@ mod tests {
         source: SourceId,
         barrier: Option<std::sync::Arc<std::sync::Barrier>>,
         panics: bool,
+        gate: Option<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl Backend for TestBackend {
@@ -383,6 +405,12 @@ mod tests {
         fn packages(&self) -> Result<Vec<Package>> {
             if self.panics {
                 panic!("test backend panic");
+            }
+            if let Some(gate) = &self.gate {
+                gate.lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("a later source never finished while this one was still running");
             }
             if let Some(barrier) = &self.barrier {
                 // A sequential refresh would block here forever; fail loudly instead.
@@ -500,6 +528,7 @@ mod tests {
                 source: SourceId::new(name),
                 barrier: Some(barrier.clone()),
                 panics: false,
+                gate: None,
             })
         };
         let mut store = Store::new(
@@ -517,20 +546,70 @@ mod tests {
     }
 
     #[test]
-    fn a_panicking_backend_is_reported_as_failed_and_others_still_update() {
+    fn a_source_that_is_ready_is_reported_and_written_before_a_slower_earlier_one() {
+        let (release, gate) = std::sync::mpsc::channel();
         let mut store = Store::new(
             Index::open_in_memory().unwrap(),
+            vec![
+                Box::new(TestBackend {
+                    source: SourceId::new("slow"),
+                    barrier: None,
+                    panics: false,
+                    gate: Some(std::sync::Mutex::new(gate)),
+                }),
+                boxed(FakeBackend::new("fast", vec![pkg("fast", "quick", "x")])),
+                boxed(FakeBackend::new("off", vec![]).unavailable()),
+            ],
+        );
+        let finished = std::sync::Mutex::new(Vec::new());
+        let report = store.refresh_with(None, &|source, stage| {
+            if let RefreshStage::Finished(_) = stage {
+                finished.lock().unwrap().push(source.to_string());
+                // The slow source may only complete once "fast" has been reported.
+                if source.to_string() == "fast" {
+                    release.send(()).unwrap();
+                }
+            }
+        });
+        assert_eq!(finished.into_inner().unwrap(), ["off", "fast", "slow"]);
+        let names: Vec<_> = report
+            .sources
+            .iter()
+            .map(|r| r.source.to_string())
+            .collect();
+        assert_eq!(names, ["slow", "fast", "off"]);
+        assert_eq!(report.sources[0].outcome, Outcome::Updated { packages: 1 });
+    }
+
+    #[test]
+    fn a_panicking_backend_is_reported_as_failed_and_others_still_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        Store::new(
+            Index::open(&path).unwrap(),
+            vec![boxed(FakeBackend::new("p", vec![pkg("p", "keep", "x")]))],
+        )
+        .refresh();
+        let mut store = Store::new(
+            Index::open(&path).unwrap(),
             vec![
                 boxed(FakeBackend::new("a", vec![pkg("a", "tool-a", "x")])),
                 Box::new(TestBackend {
                     source: SourceId::new("p"),
                     barrier: None,
                     panics: true,
+                    gate: None,
                 }),
                 boxed(FakeBackend::new("c", vec![pkg("c", "tool-c", "x")])),
             ],
         );
-        let report = store.refresh();
+        let events = std::sync::Mutex::new(Vec::new());
+        let report = store.refresh_with(None, &|source, stage| {
+            events
+                .lock()
+                .unwrap()
+                .push((source.to_string(), stage.clone()));
+        });
         let outcomes: Vec<_> = report.sources.iter().map(|r| r.outcome.clone()).collect();
         assert_eq!(
             outcomes,
@@ -540,6 +619,11 @@ mod tests {
                 Outcome::Updated { packages: 1 }
             ]
         );
+        assert!(events.into_inner().unwrap().contains(&(
+            "p".to_string(),
+            RefreshStage::Finished(Outcome::Failed("backend panicked".into()))
+        )));
         assert_eq!(store.search("tool", 10).unwrap().len(), 2);
+        assert_eq!(store.search("keep", 10).unwrap().len(), 1);
     }
 }
