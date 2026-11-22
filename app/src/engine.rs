@@ -14,9 +14,10 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use store_core::{
     App, Backend, CancelToken, Catalog, Host, Index, InstallError, Installer, Outcome,
@@ -190,15 +191,40 @@ impl Shared {
     }
 }
 
+/// How long `Drop` waits for a running refresh before leaving its thread behind. A backend
+/// download cannot be cancelled, and the index is only a cache: SQLite rolls back a write that
+/// the process exit cuts off.
+const REFRESH_WAIT: Duration = Duration::from_secs(1);
+
+/// How long `Drop` waits for the operations thread after cancelling the running operation, so an
+/// in-flight package commit can end. An open authentication dialog would otherwise hold it.
+const OPERATION_WAIT: Duration = Duration::from_secs(10);
+
+/// How `Drop` waits for a thread.
+enum Wait {
+    Join,
+    Refresh,
+    Operations,
+}
+
+struct Worker {
+    handle: JoinHandle<()>,
+    wait: Wait,
+    /// Disconnects when the thread's work has returned (or panicked).
+    done: Receiver<()>,
+}
+
 pub struct Engine {
     channels: Option<Channels>,
     shared: Arc<Shared>,
-    threads: Vec<JoinHandle<()>>,
+    workers: Vec<Worker>,
+    operation_wait: Duration,
 }
 
 impl Engine {
     /// Opens the index at `config.db_path` (creating its directory) and starts the threads.
     /// Nothing is refreshed until a `Command::Refresh` arrives.
+    /// `on_event` must not own the `Engine`: dropping it from an engine thread would deadlock.
     pub fn start(
         config: EngineConfig,
         on_event: impl Fn(Event) + Send + Sync + 'static,
@@ -236,7 +262,8 @@ impl Engine {
                 stopping: AtomicBool::new(false),
                 running: Mutex::new(None),
             }),
-            threads: Vec::new(),
+            workers: Vec::new(),
+            operation_wait: OPERATION_WAIT,
         };
 
         // On a spawn error, returning drops `engine`, which joins the threads already started.
@@ -245,9 +272,11 @@ impl Engine {
             catalog: query_catalog,
             installable: installable.clone(),
         };
-        engine.spawn("store-query", move || query.run(query_rx, &shared, &cb))?;
+        engine.spawn("store-query", Wait::Join, move || {
+            query.run(query_rx, &shared, &cb)
+        })?;
         let (shared, cb) = (engine.shared.clone(), on_event.clone());
-        engine.spawn("store-refresh", move || {
+        engine.spawn("store-refresh", Wait::Refresh, move || {
             refresh_loop(store, refresh_catalog, refresh_rx, &shared, &cb)
         })?;
         let (shared, cb) = (engine.shared.clone(), on_event.clone());
@@ -257,24 +286,34 @@ impl Engine {
             installable,
             refresh: ops_refresh,
         };
-        engine.spawn("store-operations", move || {
+        engine.spawn("store-operations", Wait::Operations, move || {
             operations.run(ops_rx, &shared, &cb)
         })?;
         let icons_rx = Arc::new(Mutex::new(icons_rx));
         for n in 0..ICON_THREADS {
             let (shared, cb, rx) = (engine.shared.clone(), on_event.clone(), icons_rx.clone());
-            engine.spawn(&format!("store-icons-{n}"), move || {
+            engine.spawn(&format!("store-icons-{n}"), Wait::Join, move || {
                 icon_loop(&rx, &shared, &cb)
             })?;
         }
         Ok(engine)
     }
 
-    fn spawn(&mut self, name: &str, work: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+    fn spawn(
+        &mut self,
+        name: &str,
+        wait: Wait,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (done_tx, done) = channel::<()>();
         let handle = std::thread::Builder::new()
             .name(name.to_string())
-            .spawn(work)?;
-        self.threads.push(handle);
+            .spawn(move || {
+                // Dropped after `work` returns or unwinds, which disconnects `done`.
+                let _done = done_tx;
+                work();
+            })?;
+        self.workers.push(Worker { handle, wait, done });
         Ok(())
     }
 
@@ -312,6 +351,8 @@ impl Engine {
     }
 }
 
+/// Queued operations and refreshes are discarded; the refresh and operations threads are waited
+/// for only a bounded time (`REFRESH_WAIT`, `OPERATION_WAIT`) and then left to end on their own.
 impl Drop for Engine {
     fn drop(&mut self) {
         {
@@ -323,9 +364,21 @@ impl Drop for Engine {
         }
         // Closing the channels ends every thread's receive loop.
         self.channels = None;
-        for handle in self.threads.drain(..) {
+        for worker in self.workers.drain(..) {
+            let limit = match worker.wait {
+                Wait::Join => None,
+                Wait::Refresh => Some(REFRESH_WAIT),
+                Wait::Operations => Some(self.operation_wait),
+            };
+            if let Some(limit) = limit
+                && let Err(RecvTimeoutError::Timeout) = worker.done.recv_timeout(limit)
+            {
+                // Still busy: leave it detached. It only touches what it owns and its own
+                // clones of the callback and the shared state, and stops taking work.
+                continue;
+            }
             // A thread only ends by panicking if `emit`'s guard failed; nothing to do then.
-            let _ = handle.join();
+            let _ = worker.handle.join();
         }
     }
 }
@@ -628,4 +681,87 @@ fn printable(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use store_core::testing::{FakeBackend, pkg};
+    use store_protocol::Event as HelperEvent;
+
+    use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Signals that it started, then ignores its cancel token until released.
+    struct StubbornInstaller {
+        started: Mutex<Sender<()>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl Installer for StubbornInstaller {
+        fn run(
+            &self,
+            _request: &Request,
+            _cancel: &CancelToken,
+            _on_event: &mut dyn FnMut(HelperEvent),
+        ) -> Result<(), InstallError> {
+            let _ = self.started.lock().unwrap().send(());
+            // Released by the test, or by the test ending (the sender is dropped).
+            let _ = self.release.lock().unwrap().recv();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_the_engine_stops_waiting_for_an_operation_that_ignores_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (started_tx, started) = channel();
+        let (release, release_rx) = channel();
+        let (events_tx, events) = channel();
+        let events_tx = Mutex::new(events_tx);
+        let config = EngineConfig {
+            db_path: dir.path().join("index.db"),
+            backends: vec![Box::new(FakeBackend::new(
+                "pacman",
+                vec![pkg("pacman", "tree", "x")],
+            ))],
+            installer: Arc::new(StubbornInstaller {
+                started: Mutex::new(started_tx),
+                release: Mutex::new(release_rx),
+            }),
+            installable: vec![SourceId::new("pacman")],
+            host: Host::none(),
+        };
+        let mut engine = Engine::start(config, move |event| {
+            let _ = events_tx.lock().unwrap().send(event);
+        })
+        .unwrap();
+        engine.operation_wait = Duration::from_millis(200);
+        engine.send(Command::Refresh);
+        while events.recv_timeout(TIMEOUT).unwrap() != Event::RefreshDone {}
+        engine.send(Command::Install {
+            key: "tree".into(),
+            source: SourceId::new("pacman"),
+        });
+        started.recv_timeout(TIMEOUT).unwrap();
+
+        let (dropped_tx, dropped) = channel();
+        let begin = Instant::now();
+        std::thread::spawn(move || {
+            drop(engine);
+            let _ = dropped_tx.send(());
+        });
+        dropped
+            .recv_timeout(TIMEOUT)
+            .expect("dropping the engine did not return within 5 s");
+        assert!(
+            begin.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            begin.elapsed()
+        );
+        // The detached operations thread finishes once the installer returns.
+        let _ = release.send(());
+    }
 }

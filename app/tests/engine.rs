@@ -672,6 +672,53 @@ fn an_installer_panic_still_finishes_the_operation() {
     assert!(h.finished().is_err());
 }
 
+/// A backend whose `packages()` signals that it started, then blocks until released.
+struct BlockingBackend {
+    started: Mutex<Sender<()>>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl Backend for BlockingBackend {
+    fn source(&self) -> SourceId {
+        source("slow")
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+    fn packages(&self) -> store_core::Result<Vec<Package>> {
+        let _ = self.started.lock().unwrap().send(());
+        // Released by the test, or by the test ending (the sender is dropped).
+        let _ = self.release.lock().unwrap().recv();
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn dropping_the_engine_does_not_wait_for_a_slow_refresh() {
+    let (started_tx, started) = channel();
+    let (release, release_rx) = channel();
+    let backend = BlockingBackend {
+        started: Mutex::new(started_tx),
+        release: Mutex::new(release_rx),
+    };
+    let h = start(vec![Box::new(backend)], idle());
+    h.engine.send(Command::Refresh);
+    started.recv_timeout(TIMEOUT).unwrap();
+    let Harness { engine, .. } = h;
+    let begin = Instant::now();
+    drop_within_timeout(engine);
+    assert!(
+        begin.elapsed() < Duration::from_secs(3),
+        "drop took {:?}",
+        begin.elapsed()
+    );
+    // Only now does the backend return; the detached refresh thread then ends on its own.
+    let _ = release.send(());
+}
+
 // --- icons ---
 
 #[test]
