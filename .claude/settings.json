@@ -2,5 +2,20 @@
   "enabledPlugins": {
     "slint@slint": true,
     "rust-analyzer-lsp@anthropic-plugin-directory": true
+  },
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CARGO_TERM_COLOR": "never",
+    "CARGO_TERM_PROGRESS_WHEN": "never"
+  },
+  "permissions": {
+    "deny": [
+      "Read(./target/**)",
+      "Read(./.claude/worktrees/**/target/**)",
+      "Read(./Cargo.lock)",
+      "Read(./legacy/**)",
+      "Read(./docs/*.png)",
+      "Read(./docs/*.svg)"
+    ]
   }
 }
