@@ -7,7 +7,7 @@
     {"id": "P2", "name": "Backends AUR e Flatpak (leitura)", "plan": "docs/2026-11-20-aur-flatpak-plan.md", "done": 4, "total": 4, "status": "fundido", "dates": "2026-11-20", "ref": "78b2675..a9e1cce"},
     {"id": "P3", "name": "Helper privilegiado (pkexec)", "plan": "docs/2026-11-20-privileged-helper-plan.md", "done": 6, "total": 6, "status": "fundido (PR #4)", "dates": "2026-11-20 a 2026-11-21", "ref": "3f48043..041fd8d"},
     {"id": "P4", "name": "Minors das etapas 1 a 3 e busca por fonte", "plan": "", "done": 1, "total": 1, "status": "fundido (PR #5)", "dates": "2026-11-21", "ref": "16c5ca9..e05f955"},
-    {"id": "P5", "name": "GUI Slint, rodada 1", "plan": "docs/2026-11-21-gui-round1-plan.md (branch worktree-gui-design)", "done": 17, "total": 17, "status": "pronto, não fundido (41 commits)", "dates": "2026-11-21 a 2026-11-22", "ref": "efcab65..7684d63"},
+    {"id": "P5", "name": "GUI Slint, rodada 1", "plan": "docs/2026-11-21-gui-round1-plan.md", "done": 17, "total": 17, "status": "fundido (PR #6)", "dates": "2026-11-21 a 2026-11-22", "ref": "efcab65..7684d63"},
     {"id": "P6", "name": "Backends apt e dnf, adaptador PackageKit", "plan": "", "done": 0, "total": 0, "status": "não planejado", "dates": "", "ref": ""},
     {"id": "P7", "name": "Snap, AppImage, firmware, drivers, AUR com compilação", "plan": "", "done": 0, "total": 0, "status": "não planejado", "dates": "", "ref": ""}
   ],
@@ -16,6 +16,6 @@
     "Latência da busca com prefixo de 3 letras não medida",
     "Kernel e bootloader fora do conjunto protegido do helper e IgnorePkg em nomes explícitos do install: não verificados",
     "Cópia privada do banco para o upgrade poder ser cancelado depois do refresh",
-    "Fundir a branch worktree-gui-design (PR, CI verde, merge sem squash)"
+    "Rodar a GUI na máquina de desenvolvimento e conferir o roteiro de verificação manual (docs/)"
   ]
 }
