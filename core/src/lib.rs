@@ -18,4 +18,4 @@ pub use host::Host;
 pub use index::Index;
 pub use installer::{CancelToken, InstallError, Installer};
 pub use package::{Package, SourceId};
-pub use store::{Outcome, RefreshReport, SourceReport, Store};
+pub use store::{Outcome, RefreshReport, RefreshStage, SourceReport, Store};

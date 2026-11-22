@@ -16,6 +16,13 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Progress of one source during [`Store::refresh_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshStage {
+    Started,
+    Finished(Outcome),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceReport {
     pub source: SourceId,
@@ -51,28 +58,63 @@ impl Store {
     /// Reloads the index from every available backend. One source's outcome never affects
     /// another's, and a source that is unavailable or fails keeps its previous data.
     pub fn refresh(&mut self) -> RefreshReport {
-        let mut sources = Vec::with_capacity(self.backends.len());
-        for backend in &self.backends {
-            let source = backend.source();
-            let outcome = if !backend.is_available() {
-                Outcome::Unavailable {
-                    reason: backend.unavailable_reason(),
-                }
-            } else {
-                match backend
-                    .packages()
-                    .map(first_of_each_name)
-                    .and_then(|packages| {
-                        self.index
-                            .replace_source(&source, &packages)
-                            .map(|()| packages.len())
-                    }) {
-                    Ok(packages) => Outcome::Updated { packages },
-                    Err(e) => Outcome::Failed(failure_message(&e)),
-                }
-            };
-            sources.push(SourceReport { source, outcome });
+        self.refresh_with(None, &|_, _| {})
+    }
+
+    /// Like [`Store::refresh`], but limited to the sources in `only` (when given; names that match
+    /// no backend are ignored) and reporting progress. The slow `Backend::packages()` calls run
+    /// in parallel, one thread per source; the index is written one source at a time, in backend
+    /// order, on the calling thread. `progress` may be called from several threads.
+    pub fn refresh_with(
+        &mut self,
+        only: Option<&[SourceId]>,
+        progress: &(dyn Fn(&SourceId, &RefreshStage) + Sync),
+    ) -> RefreshReport {
+        let Store {
+            index, backends, ..
+        } = self;
+        let in_scope: Vec<(SourceId, &dyn Backend)> = backends
+            .iter()
+            .map(|b| (b.source(), b.as_ref()))
+            .filter(|(source, _)| only.is_none_or(|only| only.contains(source)))
+            .collect();
+        for (source, _) in &in_scope {
+            progress(source, &RefreshStage::Started);
         }
+        let mut sources = Vec::with_capacity(in_scope.len());
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = in_scope
+                .iter()
+                .map(|(_, backend)| {
+                    backend
+                        .is_available()
+                        .then(|| scope.spawn(move || backend.packages().map(first_of_each_name)))
+                })
+                .collect();
+            for ((source, backend), handle) in in_scope.iter().zip(handles) {
+                let outcome = match handle {
+                    None => Outcome::Unavailable {
+                        reason: backend.unavailable_reason(),
+                    },
+                    Some(handle) => match handle.join() {
+                        Err(_) => Outcome::Failed("backend panicked".to_string()),
+                        Ok(collected) => match collected.and_then(|packages| {
+                            index
+                                .replace_source(source, &packages)
+                                .map(|()| packages.len())
+                        }) {
+                            Ok(packages) => Outcome::Updated { packages },
+                            Err(e) => Outcome::Failed(failure_message(&e)),
+                        },
+                    },
+                };
+                progress(source, &RefreshStage::Finished(outcome.clone()));
+                sources.push(SourceReport {
+                    source: source.clone(),
+                    outcome,
+                });
+            }
+        });
         RefreshReport { sources }
     }
 
@@ -318,5 +360,186 @@ mod tests {
         let order: Vec<String> = groups.iter().map(|(s, _)| s.to_string()).collect();
         assert_eq!(order, ["pacman", "flatpak", "aur", "zzz"]);
         assert!(groups.iter().all(|(_, found)| found.len() == 1));
+    }
+
+    /// A backend whose `packages()` waits on a shared barrier (so it only returns when its peer
+    /// runs at the same time) or panics.
+    struct TestBackend {
+        source: SourceId,
+        barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+        panics: bool,
+    }
+
+    impl Backend for TestBackend {
+        fn source(&self) -> SourceId {
+            self.source.clone()
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable_reason(&self) -> Option<String> {
+            None
+        }
+        fn packages(&self) -> Result<Vec<Package>> {
+            if self.panics {
+                panic!("test backend panic");
+            }
+            if let Some(barrier) = &self.barrier {
+                // A sequential refresh would block here forever; fail loudly instead.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = tx.send(());
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the sources did not run in parallel (barrier timed out)");
+            }
+            let name = format!("{}-pkg", self.source);
+            Ok(vec![pkg(&self.source.to_string(), &name, "x")])
+        }
+    }
+
+    #[test]
+    fn progress_reports_started_then_finished_per_source() {
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "one", "x")])),
+                boxed(FakeBackend::new("b", vec![]).unavailable()),
+                boxed(FakeBackend::new("c", vec![]).failing("boom")),
+            ],
+        );
+        let events = std::sync::Mutex::new(Vec::new());
+        let report = store.refresh_with(None, &|source, stage| {
+            events
+                .lock()
+                .unwrap()
+                .push((source.to_string(), stage.clone()));
+        });
+        let events = events.into_inner().unwrap();
+        for (name, outcome) in [
+            ("a", Outcome::Updated { packages: 1 }),
+            ("b", Outcome::Unavailable { reason: None }),
+            ("c", Outcome::Failed("boom".into())),
+        ] {
+            let mine: Vec<_> = events.iter().filter(|(s, _)| s == name).collect();
+            assert_eq!(
+                mine,
+                [
+                    &(name.to_string(), RefreshStage::Started),
+                    &(name.to_string(), RefreshStage::Finished(outcome))
+                ]
+            );
+        }
+        assert_eq!(report.sources.len(), 3);
+    }
+
+    #[test]
+    fn refresh_only_touches_the_named_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut store = Store::new(
+            Index::open(&path).unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "old-a", "x")])),
+                boxed(FakeBackend::new("b", vec![pkg("b", "old-b", "x")])),
+            ],
+        );
+        store.refresh();
+        let mut store = Store::new(
+            Index::open(&path).unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "new-a", "x")])),
+                boxed(FakeBackend::new("b", vec![pkg("b", "new-b", "x")])),
+            ],
+        );
+        let only = [SourceId::new("a"), SourceId::new("nonexistent")];
+        let report = store.refresh_with(Some(&only), &|_, _| {});
+        assert_eq!(
+            report.sources,
+            [SourceReport {
+                source: SourceId::new("a"),
+                outcome: Outcome::Updated { packages: 1 }
+            }]
+        );
+        assert_eq!(store.search("new-a", 10).unwrap().len(), 1);
+        assert_eq!(store.search("old-a", 10).unwrap().len(), 0);
+        assert_eq!(store.search("old-b", 10).unwrap().len(), 1);
+        assert_eq!(store.search("new-b", 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn one_failing_source_does_not_stop_the_others() {
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "tool-a", "x")])),
+                boxed(FakeBackend::new("b", vec![]).failing("boom")),
+                boxed(FakeBackend::new("c", vec![pkg("c", "tool-c", "x")])),
+            ],
+        );
+        let report = store.refresh();
+        let outcomes: Vec<_> = report.sources.iter().map(|r| r.outcome.clone()).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::Updated { packages: 1 },
+                Outcome::Failed("boom".into()),
+                Outcome::Updated { packages: 1 }
+            ]
+        );
+        assert_eq!(store.search("tool", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sources_really_run_in_parallel() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let backend = |name: &str| -> Box<dyn Backend> {
+            Box::new(TestBackend {
+                source: SourceId::new(name),
+                barrier: Some(barrier.clone()),
+                panics: false,
+            })
+        };
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![backend("a"), backend("b")],
+        );
+        let report = store.refresh();
+        assert!(
+            report
+                .sources
+                .iter()
+                .all(|r| r.outcome == Outcome::Updated { packages: 1 }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_backend_is_reported_as_failed_and_others_still_update() {
+        let mut store = Store::new(
+            Index::open_in_memory().unwrap(),
+            vec![
+                boxed(FakeBackend::new("a", vec![pkg("a", "tool-a", "x")])),
+                Box::new(TestBackend {
+                    source: SourceId::new("p"),
+                    barrier: None,
+                    panics: true,
+                }),
+                boxed(FakeBackend::new("c", vec![pkg("c", "tool-c", "x")])),
+            ],
+        );
+        let report = store.refresh();
+        let outcomes: Vec<_> = report.sources.iter().map(|r| r.outcome.clone()).collect();
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::Updated { packages: 1 },
+                Outcome::Failed("backend panicked".into()),
+                Outcome::Updated { packages: 1 }
+            ]
+        );
+        assert_eq!(store.search("tool", 10).unwrap().len(), 2);
     }
 }
