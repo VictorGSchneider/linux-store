@@ -4616,12 +4616,9 @@ name = "store-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "store-backend-aur",
- "store-backend-flatpak",
- "store-backend-pacman",
  "store-core",
- "store-installer-pkexec",
  "store-protocol",
+ "store-system",
  "tempfile",
  "terminal_size",
 ]
@@ -4667,6 +4664,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "store-system"
+version = "0.1.0"
+dependencies = [
+ "store-backend-aur",
+ "store-backend-flatpak",
+ "store-backend-pacman",
+ "store-core",
+ "store-installer-pkexec",
 ]
 
 [[package]]

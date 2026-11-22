@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use clap::{Parser, Subcommand};
 use store_core::{CancelToken, InstallError, Installer, Outcome, Package, Store};
 use store_protocol::{ChangeKind, Event, Operation, Request, Stage, is_valid_name};
+pub use store_system::{default_db_path, default_db_path_from};
 
 #[derive(Parser)]
 #[command(
@@ -55,22 +56,6 @@ enum Command {
     },
     /// Refresh the package databases and upgrade the whole system (asks for your password).
     Upgrade,
-}
-
-/// `$XDG_CACHE_HOME/linux-store/index.db`, else `$HOME/.cache/linux-store/index.db`.
-pub fn default_db_path_from(
-    xdg_cache_home: Option<OsString>,
-    home: Option<OsString>,
-) -> Option<PathBuf> {
-    let cache = match xdg_cache_home.filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".cache"),
-    };
-    Some(cache.join("linux-store").join("index.db"))
-}
-
-pub fn default_db_path() -> Option<PathBuf> {
-    default_db_path_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
 }
 
 /// Text from a repository or from the helper is untrusted: a control character (an escape

@@ -1,10 +1,6 @@
 use std::process::ExitCode;
 
-use store_backend_aur::AurBackend;
-use store_backend_flatpak::FlatpakBackend;
-use store_backend_pacman::PacmanBackend;
-use store_core::{Backend, Index, Store};
-use store_installer_pkexec::PkexecInstaller;
+use store_core::{Host, Index, Store};
 
 fn main() -> ExitCode {
     // args_os: an argument that is not valid UTF-8 must be a usage error, not a panic.
@@ -12,14 +8,9 @@ fn main() -> ExitCode {
     let code = store_cli::run(
         &args,
         |path| {
-            let backends: Vec<Box<dyn Backend>> = vec![
-                Box::new(PacmanBackend::from_system()),
-                Box::new(FlatpakBackend::from_system()),
-                Box::new(AurBackend::new()),
-            ];
-            Ok(Store::new(Index::open(path)?, backends))
+            Ok(Store::new(Index::open(path)?, store_system::backends()).with_host(Host::detect()))
         },
-        &PkexecInstaller::system(),
+        &store_system::installer(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     );

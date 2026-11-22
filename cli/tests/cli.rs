@@ -1,9 +1,8 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
 
-use store_cli::{default_db_path_from, run};
+use store_cli::run;
 use store_core::testing::{FakeBackend, FakeInstaller, pkg};
-use store_core::{Index, InstallError, Package, Store};
+use store_core::{Host, Index, InstallError, Package, Store};
 use store_protocol::{Change, ChangeKind, ErrorCode, Event, Operation, Request, Stage};
 
 /// Runs the CLI against `db` with one fake backend; returns (exit code, stdout, stderr).
@@ -115,25 +114,6 @@ fn usage_errors_exit_nonzero() {
     let (code, _, err) = run_cli(&["frobnicate"], fake());
     assert_ne!(code, 0);
     assert!(!err.is_empty());
-}
-
-#[test]
-fn default_db_path_prefers_xdg_cache_home() {
-    let path = default_db_path_from(
-        Some(OsString::from("/x/cache")),
-        Some(OsString::from("/home/u")),
-    );
-    assert_eq!(path, Some(PathBuf::from("/x/cache/linux-store/index.db")));
-}
-
-#[test]
-fn default_db_path_falls_back_to_home_cache() {
-    let path = default_db_path_from(None, Some(OsString::from("/home/u")));
-    assert_eq!(
-        path,
-        Some(PathBuf::from("/home/u/.cache/linux-store/index.db"))
-    );
-    assert_eq!(default_db_path_from(None, None), None);
 }
 
 #[test]
@@ -551,4 +531,52 @@ fn search_with_one_source_hit_is_a_single_column() {
     assert_eq!(code, 0);
     assert!(out.starts_with("aur"), "{out}");
     assert!(!out.contains("pacman"), "{out}");
+}
+
+#[test]
+fn search_columns_follow_host_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db(&dir);
+    let sources = || -> Vec<Box<dyn store_core::Backend>> {
+        ["aur", "flatpak", "pacman"]
+            .into_iter()
+            .map(|s| {
+                Box::new(FakeBackend::new(s, vec![pkg(s, "tool", "a tool")]))
+                    as Box<dyn store_core::Backend>
+            })
+            .collect()
+    };
+    let run_with = |args: &[&str]| {
+        let argv: Vec<OsString> = std::iter::once("store")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let installer = FakeInstaller::new(vec![], Ok(()));
+        let code =
+            run(
+                &argv,
+                |path| {
+                    Ok(Store::new(Index::open(path)?, sources())
+                        .with_host(Host::with_native("pacman")))
+                },
+                &installer,
+                &mut out,
+                &mut err,
+            );
+        assert_eq!(code, 0);
+        String::from_utf8(out).unwrap()
+    };
+    run_with(&["--db", &db, "refresh"]);
+    let out = run_with(&["--db", &db, "search", "--width", "90", "tool"]);
+    let header = out.lines().next().unwrap();
+    let at = |name: &str| {
+        header
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} in {header}"))
+    };
+    assert!(
+        at("pacman") < at("flatpak") && at("flatpak") < at("aur"),
+        "{header}"
+    );
 }

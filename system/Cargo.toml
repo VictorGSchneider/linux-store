@@ -1,0 +1,13 @@
+[package]
+name = "store-system"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "The real backends, installer and index path of this machine, shared by the CLI and the GUI"
+
+[dependencies]
+store-core = { path = "../core" }
+store-installer-pkexec = { path = "../installers/pkexec" }
+store-backend-pacman = { path = "../backends/pacman" }
+store-backend-aur = { path = "../backends/aur" }
+store-backend-flatpak = { path = "../backends/flatpak" }
