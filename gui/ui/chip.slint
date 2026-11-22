@@ -1,0 +1,70 @@
+import { Theme } from "theme.slint";
+
+export struct ChipData {
+    source: string,
+    count: int,
+    // `count` with thousands separators, formatted by the host
+    count-text: string,
+    selected: bool,
+    // the source is being refreshed right now
+    updating: bool,
+}
+
+export component Chip inherits Rectangle {
+    in property <ChipData> data;
+    callback clicked(string);
+
+    height: Theme.chip-height;
+    width: max(lay.preferred-width + 24px, 64px);
+    border-radius: self.height / 2;
+    background: root.data.selected ? Theme.chip-selected : root.data.updating ? Theme.chip-updating : (touch.has-hover ? Theme.pill-hover : Theme.pill);
+    accessible-role: button;
+    accessible-label: root.data.source;
+    accessible-description: root.data.updating ? @tr("updating") : "";
+    accessible-checkable: true;
+    accessible-checked: root.data.selected;
+    accessible-action-default => {
+        root.clicked(root.data.source);
+    }
+
+    lay := VerticalLayout {
+        alignment: center;
+        Text {
+            text: root.data.source;
+            color: Theme.pill-text;
+            font-size: Theme.font-chip;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.data.updating ? @tr("updating…") : @tr("{0} package" | "{0} packages" % root.data.count, root.data.count-text);
+            color: root.data.selected ? Theme.pill-text : Theme.pill-text-dim;
+            font-size: Theme.font-chip-count;
+            horizontal-alignment: center;
+        }
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked(root.data.source);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // focus ring
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked(root.data.source);
+        }
+    }
+}

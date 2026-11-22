@@ -7,6 +7,14 @@ edition = "2024"
 
 [dependencies]
 slint = "1.19.0"
+store-app = { path = "../app" }
+store-core = { path = "../core" }
+store-system = { path = "../system" }
+
+[dev-dependencies]
+png = "0.18"
+store-core = { path = "../core", features = ["testing"] }
+store-protocol = { path = "../protocol" }
 
 [build-dependencies]
 slint-build = "1.19.0"

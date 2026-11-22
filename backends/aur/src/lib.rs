@@ -91,6 +91,8 @@ struct Entry {
     description: Option<String>,
     #[serde(rename = "URL")]
     url: Option<String>,
+    #[serde(default)]
+    popularity: Option<f64>,
 }
 
 /// Turns each array element into a `Package` as it is parsed, so memory stays flat.
@@ -123,6 +125,11 @@ impl<'de> Visitor<'de> for &mut Collect {
                 url: entry.url,
                 download_size: 0,
                 installed_size: 0,
+                app_id: None,
+                categories: Vec::new(),
+                icon: None,
+                popularity: entry.popularity.filter(|p| p.is_finite()),
+                upgradable: false,
             });
         }
         Ok(())

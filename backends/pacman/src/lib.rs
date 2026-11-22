@@ -1,8 +1,9 @@
 //! Read-only pacman backend: reads the sync and local databases through libalpm.
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use alpm::{Alpm, SigLevel};
+use alpm::{Alpm, SigLevel, vercmp};
 use store_core::{Backend, Error, Package, Result, SourceId};
 
 const SOURCE: &str = "pacman";
@@ -19,6 +20,94 @@ enum Config {
 
 pub struct PacmanBackend {
     config: Config,
+    /// Directories holding `xml/*.xml[.gz]` and `icons/<origin>/<WxH>/`.
+    catalog_dirs: Vec<PathBuf>,
+}
+
+/// What the AppStream catalog says about one package name.
+struct CatalogEntry {
+    app_id: String,
+    title: Option<String>,
+    categories: Vec<String>,
+    icon: Option<String>,
+}
+
+/// The cached 64 px icon, else the narrowest cached one, when its file is really on disk.
+fn catalog_icon(c: &store_appstream::Component, icons_root: &Path) -> Option<String> {
+    let icon = c
+        .icons
+        .iter()
+        .filter(|i| i.kind == "cached")
+        .find(|i| i.width == Some(64))
+        .or_else(|| {
+            c.icons
+                .iter()
+                .filter(|i| i.kind == "cached" && i.width.is_some())
+                .min_by_key(|i| i.width)
+        })?;
+    if !store_appstream::is_plain_file_name(&icon.value) {
+        return None;
+    }
+    let width = icon.width?;
+    let path = icons_root
+        .join(format!("{width}x{width}"))
+        .join(&icon.value);
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
+/// Maps package names to their first application component. Unreadable catalogs are skipped:
+/// enrichment is optional.
+fn read_catalog(dirs: &[PathBuf]) -> HashMap<String, CatalogEntry> {
+    let mut map = HashMap::new();
+    for dir in dirs {
+        let Ok(read) = std::fs::read_dir(dir.join("xml")) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.ends_with(".xml") || name.ends_with(".xml.gz")
+            })
+            .collect();
+        files.sort();
+        for file in files {
+            // `origin` is only known once parsing ends, and it picks the icon directory, so
+            // application components are held until then. A file that fails to parse is skipped.
+            let mut apps = Vec::new();
+            let origin = match store_appstream::parse_file(&file, &mut |c| {
+                let is_app = matches!(
+                    c.kind.as_str(),
+                    "desktop-application" | "console-application" | "desktop"
+                );
+                if is_app && !c.id.is_empty() && !c.pkgnames.is_empty() {
+                    apps.push(c);
+                }
+            }) {
+                Ok(origin) => origin,
+                Err(_) => continue,
+            };
+            // The origin comes from the same untrusted file as the icon values.
+            let icons_root = origin
+                .filter(|o| store_appstream::is_plain_file_name(o))
+                .map(|o| dir.join("icons").join(o));
+            for c in apps {
+                let icon = icons_root
+                    .as_deref()
+                    .and_then(|root| catalog_icon(&c, root));
+                for name in &c.pkgnames {
+                    map.entry(name.clone()).or_insert_with(|| CatalogEntry {
+                        app_id: c.id.clone(),
+                        title: c.name.clone().filter(|n| !n.is_empty()),
+                        categories: c.categories.clone(),
+                        icon: icon.clone(),
+                    });
+                }
+            }
+        }
+    }
+    map
 }
 
 impl PacmanBackend {
@@ -26,7 +115,18 @@ impl PacmanBackend {
     pub fn from_system() -> PacmanBackend {
         PacmanBackend {
             config: Config::System,
+            catalog_dirs: vec![
+                PathBuf::from("/usr/share/swcatalog"),
+                PathBuf::from("/usr/share/app-info"),
+            ],
         }
+    }
+
+    /// Reads the AppStream catalogs under `dirs` (each with `xml/*.xml[.gz]` and
+    /// `icons/<origin>/<WxH>/`) to enrich packages with an app id, title, categories and icon.
+    pub fn with_catalog_dirs(mut self, dirs: &[PathBuf]) -> PacmanBackend {
+        self.catalog_dirs = dirs.to_vec();
+        self
     }
 
     /// Opens explicit paths and registers the named sync repos. Used by tests.
@@ -37,6 +137,7 @@ impl PacmanBackend {
                 db_path: db_path.to_path_buf(),
                 repos: repos.iter().map(|r| r.to_string()).collect(),
             },
+            catalog_dirs: Vec::new(),
         }
     }
 
@@ -91,6 +192,7 @@ impl Backend for PacmanBackend {
         let local = alpm.localdb();
         let mut seen = HashSet::new();
         let mut packages = Vec::new();
+        let catalog = read_catalog(&self.catalog_dirs);
 
         for db in alpm.syncdbs() {
             let pkgs = db.pkgs();
@@ -109,18 +211,34 @@ impl Backend for PacmanBackend {
                 if !seen.insert(p.name().to_string()) {
                     continue;
                 }
-                packages.push(Package {
+                let installed = local.pkg(p.name()).ok().map(|l| l.version().to_string());
+                let upgradable = installed
+                    .as_deref()
+                    .is_some_and(|i| vercmp(p.version().as_str(), i) == Ordering::Greater);
+                let mut package = Package {
                     source: self.source(),
                     name: p.name().to_string(),
                     version: p.version().to_string(),
-                    installed_version: local.pkg(p.name()).ok().map(|l| l.version().to_string()),
+                    installed_version: installed,
                     title: None,
                     description: p.desc().map(str::to_string),
                     repo: Some(db.name().to_string()),
                     url: p.url().map(str::to_string),
                     download_size: clamp(p.size()),
                     installed_size: clamp(p.isize()),
-                });
+                    app_id: None,
+                    categories: Vec::new(),
+                    icon: None,
+                    popularity: None,
+                    upgradable,
+                };
+                if let Some(entry) = catalog.get(p.name()) {
+                    package.app_id = Some(entry.app_id.clone());
+                    package.title = entry.title.clone();
+                    package.categories = entry.categories.clone();
+                    package.icon = entry.icon.clone();
+                }
+                packages.push(package);
             }
         }
 
@@ -139,6 +257,11 @@ impl Backend for PacmanBackend {
                 url: p.url().map(str::to_string),
                 download_size: 0,
                 installed_size: clamp(p.isize()),
+                app_id: None,
+                categories: Vec::new(),
+                icon: None,
+                popularity: None,
+                upgradable: false,
             });
         }
         Ok(packages)

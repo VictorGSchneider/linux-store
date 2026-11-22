@@ -96,6 +96,91 @@ fn keeps_only_applications() {
     assert_eq!(names, ["org.example.App", "org.example.Cli"]);
 }
 
+fn app_with_icon(id: &str) -> String {
+    format!(
+        r#"<component type="desktop-application">
+  <id>{id}</id>
+  <name>Iconic</name>
+  <categories><category>Graphics</category><category>Utility</category></categories>
+  <icon type="cached" width="64" height="64">{id}-64.png</icon>
+  <icon type="cached" width="128" height="128">{id}-128.png</icon>
+  <bundle type="flatpak">app/{id}/{ARCH}/stable</bundle>
+</component>"#
+    )
+}
+
+#[test]
+fn package_has_app_id_categories_and_icon() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(
+        dir.path(),
+        "flathub",
+        &catalog(&[app_with_icon("org.example.Icon")]),
+    );
+    let icons = dir
+        .path()
+        .join("appstream/flathub")
+        .join(ARCH)
+        .join("active/icons/128x128");
+    fs::create_dir_all(&icons).unwrap();
+    fs::write(icons.join("org.example.Icon-128.png"), b"png").unwrap();
+    let packages = backend(&[dir.path()]).packages().unwrap();
+    let p = find(&packages, "org.example.Icon");
+    assert_eq!(p.app_id.as_deref(), Some("org.example.Icon"));
+    assert_eq!(p.categories, ["Graphics", "Utility"]);
+    assert_eq!(
+        p.icon.as_deref(),
+        Some(icons.join("org.example.Icon-128.png").to_str().unwrap())
+    );
+}
+
+#[test]
+fn missing_icon_file_gives_no_icon() {
+    let (_dir, packages) = load(&catalog(&[app_with_icon("org.example.NoFile")]));
+    let p = find(&packages, "org.example.NoFile");
+    assert_eq!(p.app_id.as_deref(), Some("org.example.NoFile"));
+    assert_eq!(p.icon, None);
+}
+
+#[test]
+fn hostile_icon_values_give_no_icon() {
+    let dir = tempfile::tempdir().unwrap();
+    // Files that a naive join would reach.
+    let active = dir
+        .path()
+        .join("appstream/flathub")
+        .join(ARCH)
+        .join("active");
+    fs::create_dir_all(active.join("icons/128x128/a")).unwrap();
+    fs::write(active.join("icons/128x128/a/b.png"), b"png").unwrap();
+    fs::write(active.join("icons/x.png"), b"png").unwrap();
+    let outside = dir.path().join("secret.png");
+    fs::write(&outside, b"png").unwrap();
+    let values = [
+        "../x.png".to_string(),
+        outside.to_str().unwrap().to_string(),
+        String::new(),
+        "a/b.png".to_string(),
+    ];
+    let components: Vec<String> = values
+        .iter()
+        .enumerate()
+        .map(|(n, v)| {
+            format!(
+                r#"<component type="desktop-application"><id>org.example.H{n}</id>
+<icon type="cached" width="128" height="128">{v}</icon>
+<bundle type="flatpak">app/org.example.H{n}/{ARCH}/stable</bundle></component>"#
+            )
+        })
+        .collect();
+    write_catalog(dir.path(), "flathub", &catalog(&components));
+    let packages = backend(&[dir.path()]).packages().unwrap();
+    for (n, v) in values.iter().enumerate() {
+        let p = find(&packages, &format!("org.example.H{n}"));
+        assert_eq!(p.icon, None, "icon value {v:?} must be rejected");
+    }
+}
+
 #[test]
 fn maps_fields() {
     let (_dir, packages) = load(&catalog(&[app(

@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Error, Package, Result, SourceId};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS packages (
@@ -19,17 +19,30 @@ const SCHEMA: &str = "
         url TEXT,
         download_size INTEGER NOT NULL,
         installed_size INTEGER NOT NULL,
+        app_id TEXT,
+        categories TEXT NOT NULL DEFAULT '[]',
+        icon TEXT,
+        popularity REAL,
+        upgradable INTEGER NOT NULL DEFAULT 0,
         UNIQUE (source, name)
     );
     CREATE INDEX IF NOT EXISTS packages_name_lower ON packages (lower(name));
     CREATE INDEX IF NOT EXISTS packages_title_lower ON packages (lower(title));
+    CREATE INDEX IF NOT EXISTS packages_app_id ON packages (app_id);
     CREATE VIRTUAL TABLE IF NOT EXISTS packages_fts
         USING fts5(name, title, description, tokenize = 'unicode61');
+    CREATE TABLE IF NOT EXISTS app_links (
+        source TEXT NOT NULL,
+        name TEXT NOT NULL,
+        app_key TEXT NOT NULL,
+        PRIMARY KEY (source, name)
+    );
+    CREATE INDEX IF NOT EXISTS app_links_key ON app_links (app_key);
 ";
 
 /// Columns of `packages`, in the order `row_to_package` reads them.
 const COLUMNS: &str = "source, name, version, installed_version, title, description, repo, url, \
-                       download_size, installed_size";
+                       download_size, installed_size, app_id, categories, icon, popularity, upgradable";
 
 /// Local SQLite index of every package known to every source.
 pub struct Index {
@@ -84,8 +97,9 @@ impl Index {
         {
             let mut insert = tx.prepare(
                 "INSERT INTO packages (source, name, version, installed_version, title, description, \
-                 repo, url, download_size, installed_size) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 repo, url, download_size, installed_size, app_id, categories, icon, popularity, \
+                 upgradable) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             let mut insert_fts = tx.prepare(
                 "INSERT INTO packages_fts (rowid, name, title, description) VALUES (?1, ?2, ?3, ?4)",
@@ -102,6 +116,11 @@ impl Index {
                     p.url,
                     to_sql_size(p.download_size),
                     to_sql_size(p.installed_size),
+                    p.app_id,
+                    categories_to_sql(&p.categories),
+                    p.icon,
+                    p.popularity,
+                    p.upgradable,
                 ])?;
                 let id = tx.last_insert_rowid();
                 insert_fts.execute(params![
@@ -112,6 +131,7 @@ impl Index {
                 ])?;
             }
         }
+        rebuild_links_in(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -259,12 +279,176 @@ impl Index {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Rebuilds `app_links` from `packages` (see [`rebuild_links_in`]).
+    pub fn rebuild_links(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        rebuild_links_in(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The app key of each package, in the same order, skipping packages that are not indexed.
+    pub fn keys_of(&self, packages: &[Package]) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT app_key FROM app_links WHERE source = ?1 AND name = ?2")?;
+        let mut keys = Vec::with_capacity(packages.len());
+        for p in packages {
+            // A package that is no longer linked (a refresh committed after it was found) is
+            // skipped: its absence is not an error for the reader.
+            if let Some(key) = stmt
+                .query_row(params![p.source.as_str(), p.name], |r| r.get(0))
+                .optional()?
+            {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Runs `f` inside one deferred read transaction, so every statement it runs sees the same
+    /// snapshot of the index even while another connection commits a refresh. Not reentrant:
+    /// `f` must not call `read` again.
+    pub fn read<R>(&self, f: impl FnOnce(&Index) -> Result<R>) -> Result<R> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let result = f(self);
+        // Only reads happened, so ending the transaction either way loses nothing.
+        let end = self
+            .conn
+            .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" });
+        let value = result?;
+        end?;
+        Ok(value)
+    }
+
+    /// Every package linked to `app_key`, ordered by source then name.
+    pub fn members(&self, app_key: &str) -> Result<Vec<Package>> {
+        let columns = prefixed_columns();
+        let sql = format!(
+            "SELECT {columns} FROM app_links l \
+             JOIN packages p ON p.source = l.source AND p.name = l.name \
+             WHERE l.app_key = ?1 ORDER BY p.source, p.name"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([app_key], row_to_package)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// How many packages each source has, ordered by source.
+    pub fn source_counts(&self) -> Result<Vec<(SourceId, usize)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source, COUNT(*) FROM packages GROUP BY source ORDER BY source")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(s, n)| (SourceId::new(&s), n as usize))
+            .collect())
+    }
+
+    /// Packages worth showing on a landing page. The AUR is ordered by popularity (unknown
+    /// last); any other source shows only packages with an icon, in an order that is pseudo-random
+    /// but the same for the same `seed`. A source with no icons falls back to the first by name.
+    pub fn featured(&self, source: &SourceId, limit: usize, seed: u64) -> Result<Vec<Package>> {
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        if source.as_str() == "aur" {
+            let sql = format!(
+                "SELECT {COLUMNS} FROM packages WHERE source = ?1 \
+                 ORDER BY popularity IS NULL, popularity DESC, name LIMIT ?2"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![source.as_str(), sql_limit], row_to_package)?;
+            return Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+        let sql = format!("SELECT {COLUMNS} FROM packages WHERE source = ?1 AND icon IS NOT NULL");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut with_icon = stmt
+            .query_map([source.as_str()], row_to_package)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if with_icon.is_empty() {
+            let sql =
+                format!("SELECT {COLUMNS} FROM packages WHERE source = ?1 ORDER BY name LIMIT ?2");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![source.as_str(), sql_limit], row_to_package)?;
+            return Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+        with_icon.sort_by_cached_key(|p| (seeded_hash(seed, &p.name), p.name.clone()));
+        with_icon.truncate(limit);
+        Ok(with_icon)
+    }
+
+    /// Packages flagged as upgradable, sorted by name then source.
+    pub fn upgradable(&self) -> Result<Vec<Package>> {
+        let sql =
+            format!("SELECT {COLUMNS} FROM packages WHERE upgradable = 1 ORDER BY name, source");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_package)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn count(&self) -> Result<usize> {
         let n: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM packages", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+}
+
+/// `COLUMNS` qualified with the alias `p`.
+fn prefixed_columns() -> String {
+    COLUMNS
+        .split(", ")
+        .map(|c| format!("p.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Deletes and refills `app_links`, a pure function of `packages`, with one statement.
+///
+/// 1. base key: the package's own `app_id` (an empty one counts as none); else the smallest `app_id` among packages with the
+///    same lowercased name (any source); else its lowercased name;
+/// 2. among packages of the same source and base, the smallest name keeps the base and each other
+///    gets `base#name`, so one app never has two variants from the same source;
+/// 3. nothing else: no fuzzy name matching (`firefox-bin` never links to `firefox`).
+///
+/// SQLite's `lower()` folds ASCII only, which is enough for package names. Takes a plain
+/// connection so `replace_source` can call it inside its own transaction.
+fn rebuild_links_in(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM app_links", [])?;
+    conn.execute(
+        "INSERT INTO app_links (source, name, app_key)
+         WITH base AS (
+             SELECT p.source, p.name,
+                    coalesce(
+                        nullif(p.app_id, ''),
+                        (SELECT min(q.app_id) FROM packages q
+                          WHERE lower(q.name) = lower(p.name) AND nullif(q.app_id, '') IS NOT NULL),
+                        lower(p.name)
+                    ) AS base
+               FROM packages p
+         ), ranked AS (
+             SELECT source, name, base,
+                    row_number() OVER (PARTITION BY source, base ORDER BY name) AS rn
+               FROM base
+         )
+         SELECT source, name, CASE WHEN rn = 1 THEN base ELSE base || '#' || name END
+           FROM ranked",
+        [],
+    )?;
+    Ok(())
+}
+
+/// FNV-1a over the seed and the name, then a splitmix64 finalizer so short, similar names do not
+/// order alike. Deterministic across runs and platforms (unlike `DefaultHasher`).
+fn seeded_hash(seed: u64, name: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in seed.to_le_bytes().into_iter().chain(name.bytes()) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+    }
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+    h ^ (h >> 31)
 }
 
 fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -287,7 +471,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         if found != SCHEMA_VERSION {
             // Older schema: drop it; the next refresh refills the cache.
             conn.execute_batch(
-                "DROP TABLE IF EXISTS packages_fts; DROP TABLE IF EXISTS packages;",
+                "DROP TABLE IF EXISTS packages_fts; DROP TABLE IF EXISTS packages; \
+                 DROP TABLE IF EXISTS app_links;",
             )?;
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -341,7 +526,21 @@ fn row_to_package(row: &Row<'_>) -> rusqlite::Result<Package> {
         url: row.get(7)?,
         download_size: row.get::<_, i64>(8)?.max(0) as u64,
         installed_size: row.get::<_, i64>(9)?.max(0) as u64,
+        app_id: row.get(10)?,
+        categories: categories_from_sql(&row.get::<_, String>(11)?),
+        icon: row.get(12)?,
+        popularity: row.get(13)?,
+        upgradable: row.get(14)?,
     })
+}
+
+/// Categories are stored as a JSON array, so a category containing `;` or `,` survives.
+fn categories_to_sql(categories: &[String]) -> String {
+    serde_json::to_string(categories).unwrap_or_else(|_| "[]".into())
+}
+
+fn categories_from_sql(text: &str) -> Vec<String> {
+    serde_json::from_str(text).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -366,6 +565,11 @@ mod tests {
             url: Some("https://example.org".into()),
             download_size: 1234,
             installed_size: 5678,
+            app_id: None,
+            categories: Vec::new(),
+            icon: None,
+            popularity: None,
+            upgradable: false,
         }
     }
 
@@ -393,6 +597,35 @@ mod tests {
         assert_eq!(idx.get(&sid("a"), "rich").unwrap(), Some(rich));
         assert_eq!(idx.get(&sid("a"), "bare").unwrap(), Some(bare));
         assert_eq!(idx.get(&sid("a"), "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn index_round_trips_new_package_fields() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let p = Package {
+            app_id: Some("org.mozilla.firefox".into()),
+            categories: vec!["Network".into(), "WebBrowser".into()],
+            icon: Some("/x/y.jxl".into()),
+            popularity: Some(1.5),
+            upgradable: true,
+            ..full("a", "firefox")
+        };
+        idx.replace_source(&sid("a"), std::slice::from_ref(&p))
+            .unwrap();
+        assert_eq!(idx.get(&sid("a"), "firefox").unwrap(), Some(p));
+    }
+
+    #[test]
+    fn categories_with_semicolon_are_not_split_wrongly() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let p = Package {
+            categories: vec!["A;B".into(), "C".into()],
+            ..full("a", "x")
+        };
+        idx.replace_source(&sid("a"), std::slice::from_ref(&p))
+            .unwrap();
+        let got = idx.get(&sid("a"), "x").unwrap().unwrap();
+        assert_eq!(got.categories, vec!["A;B".to_string(), "C".to_string()]);
     }
 
     #[test]
@@ -686,7 +919,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -867,7 +1100,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -909,5 +1142,447 @@ mod tests {
             ["toolbox", "qtool"]
         );
         assert_eq!(idx.search_in("qt", 10, None).unwrap().len(), 2);
+    }
+
+    fn with_app_id(source: &str, name: &str, app_id: &str) -> Package {
+        Package {
+            app_id: Some(app_id.into()),
+            ..pkg(source, name, "x")
+        }
+    }
+
+    fn multi(packages: &[Package]) -> Index {
+        let mut idx = Index::open_in_memory().unwrap();
+        for source in ["aur", "flatpak", "pacman"] {
+            let of: Vec<Package> = packages
+                .iter()
+                .filter(|p| p.source.as_str() == source)
+                .cloned()
+                .collect();
+            if !of.is_empty() {
+                idx.replace_source(&sid(source), &of).unwrap();
+            }
+        }
+        idx
+    }
+
+    fn key(idx: &Index, p: &Package) -> String {
+        idx.keys_of(std::slice::from_ref(p)).unwrap().remove(0)
+    }
+
+    #[test]
+    fn same_app_id_links_pacman_and_flatpak() {
+        let a = with_app_id("pacman", "firefox", "org.mozilla.firefox");
+        let b = with_app_id("flatpak", "org.mozilla.firefox", "org.mozilla.firefox");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), "org.mozilla.firefox");
+        assert_eq!(key(&idx, &b), "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn identical_name_links_aur_to_pacman() {
+        let a = pkg("pacman", "htop", "x");
+        let b = pkg("aur", "htop", "x");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), "htop");
+        assert_eq!(key(&idx, &b), "htop");
+    }
+
+    #[test]
+    fn name_match_ignores_case() {
+        let a = pkg("pacman", "Htop", "x");
+        let b = pkg("aur", "htop", "x");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), key(&idx, &b));
+        assert_eq!(key(&idx, &a), "htop");
+    }
+
+    #[test]
+    fn package_without_app_id_joins_the_app_id_of_a_same_named_package() {
+        let a = with_app_id("pacman", "firefox", "org.mozilla.firefox");
+        let b = pkg("aur", "firefox", "x");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &b), "org.mozilla.firefox");
+        assert_eq!(key(&idx, &a), "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn aur_firefox_bin_does_not_link_to_firefox() {
+        let a = pkg("pacman", "firefox", "x");
+        let b = pkg("aur", "firefox-bin", "x");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), "firefox");
+        assert_eq!(key(&idx, &b), "firefox-bin");
+    }
+
+    #[test]
+    fn two_packages_of_one_source_with_same_app_id_stay_separate() {
+        let foo = with_app_id("pacman", "foo", "org.x.Foo");
+        let extra = with_app_id("pacman", "foo-extra", "org.x.Foo");
+        let flat = with_app_id("flatpak", "org.x.Foo", "org.x.Foo");
+        let idx = multi(&[foo.clone(), extra.clone(), flat.clone()]);
+        assert_eq!(key(&idx, &foo), "org.x.Foo");
+        assert_eq!(key(&idx, &flat), "org.x.Foo");
+        assert_eq!(key(&idx, &extra), "org.x.Foo#foo-extra");
+    }
+
+    #[test]
+    fn links_are_rebuilt_when_another_source_arrives() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let aur = pkg("aur", "firefox", "x");
+        idx.replace_source(&sid("aur"), std::slice::from_ref(&aur))
+            .unwrap();
+        assert_eq!(key(&idx, &aur), "firefox");
+        idx.replace_source(
+            &sid("pacman"),
+            &[with_app_id("pacman", "firefox", "org.mozilla.firefox")],
+        )
+        .unwrap();
+        assert_eq!(key(&idx, &aur), "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn replacing_a_source_removes_its_old_links() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.replace_source(&sid("aur"), &[pkg("aur", "old", "x")])
+            .unwrap();
+        idx.replace_source(&sid("aur"), &[pkg("aur", "new", "x")])
+            .unwrap();
+        let n: i64 = idx
+            .conn
+            .query_row("SELECT COUNT(*) FROM app_links", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(idx.members("old").unwrap().is_empty());
+        assert_eq!(names(idx.members("new").unwrap()), ["new"]);
+    }
+
+    fn in_order(order: &[&str], packages: &[Package]) -> Index {
+        let mut idx = Index::open_in_memory().unwrap();
+        for source in order {
+            let of: Vec<Package> = packages
+                .iter()
+                .filter(|p| p.source.as_str() == *source)
+                .cloned()
+                .collect();
+            idx.replace_source(&sid(source), &of).unwrap();
+        }
+        idx
+    }
+
+    #[test]
+    fn a_name_shared_by_two_app_ids_takes_the_smaller_whatever_the_order() {
+        let a = with_app_id("pacman", "foo", "org.x.Y");
+        let c = with_app_id("flatpak", "foo", "org.a.X");
+        let b = pkg("aur", "foo", "x");
+        let all = [a.clone(), b.clone(), c.clone()];
+        let orders: [[&str; 3]; 3] = [
+            ["pacman", "flatpak", "aur"],
+            ["aur", "flatpak", "pacman"],
+            ["flatpak", "aur", "pacman"],
+        ];
+        for order in orders {
+            let idx = in_order(&order, &all);
+            assert_eq!(key(&idx, &b), "org.a.X", "{order:?}");
+            assert_eq!(key(&idx, &a), "org.x.Y", "{order:?}");
+            assert_eq!(key(&idx, &c), "org.a.X", "{order:?}");
+        }
+    }
+
+    #[test]
+    fn names_differing_only_by_case_in_one_source_stay_separate() {
+        let upper = pkg("aur", "Foo", "x");
+        let lower = pkg("aur", "foo", "x");
+        for order in [
+            [upper.clone(), lower.clone()],
+            [lower.clone(), upper.clone()],
+        ] {
+            let idx = multi(&order);
+            assert_eq!(key(&idx, &upper), "foo");
+            assert_eq!(key(&idx, &lower), "foo#foo");
+        }
+    }
+
+    #[test]
+    fn an_empty_app_id_counts_as_none() {
+        let a = with_app_id("pacman", "one", "");
+        let b = with_app_id("flatpak", "two", "");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), "one");
+        assert_eq!(key(&idx, &b), "two");
+        let empty = with_app_id("aur", "firefox", "");
+        let real = with_app_id("pacman", "firefox", "org.mozilla.firefox");
+        let idx = multi(&[empty.clone(), real]);
+        assert_eq!(key(&idx, &empty), "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn replacing_a_source_with_nothing_removes_its_links() {
+        let mut idx = multi(&[pkg("aur", "a", "x"), pkg("pacman", "b", "x")]);
+        idx.replace_source(&sid("aur"), &[]).unwrap();
+        let n: i64 = idx
+            .conn
+            .query_row("SELECT COUNT(*) FROM app_links", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(idx.members("a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rebuild_is_idempotent() {
+        let mut idx = multi(&[
+            with_app_id("pacman", "foo", "org.x.Foo"),
+            with_app_id("pacman", "foo-extra", "org.x.Foo"),
+            pkg("aur", "foo", "x"),
+        ]);
+        let dump = |idx: &Index| -> Vec<(String, String, String)> {
+            idx.conn
+                .prepare("SELECT source, name, app_key FROM app_links ORDER BY source, name")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let before = dump(&idx);
+        assert_eq!(before.len(), 3);
+        idx.rebuild_links().unwrap();
+        idx.rebuild_links().unwrap();
+        assert_eq!(dump(&idx), before);
+    }
+
+    #[test]
+    fn keys_of_keeps_the_input_order() {
+        let idx = multi(&[
+            pkg("pacman", "b", "x"),
+            pkg("pacman", "a", "x"),
+            pkg("aur", "c", "x"),
+        ]);
+        let ask = [
+            pkg("aur", "c", "x"),
+            pkg("pacman", "a", "x"),
+            pkg("pacman", "b", "x"),
+        ];
+        assert_eq!(idx.keys_of(&ask).unwrap(), ["c", "a", "b"]);
+        // A package that is gone (a refresh committed in between) is skipped, not an error.
+        assert_eq!(
+            idx.keys_of(&[pkg("aur", "missing", "x"), pkg("pacman", "a", "x")])
+                .unwrap(),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn a_read_sees_one_snapshot_while_another_connection_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let mut writer = Index::open(&path).unwrap();
+        writer
+            .replace_source(&sid("pacman"), &[pkg("pacman", "htop", "x")])
+            .unwrap();
+        let reader = Index::open(&path).unwrap();
+        let (found, keys, members) = reader
+            .read(|ix| {
+                let found = ix.search_in("htop", 10, None)?;
+                // A refresh drops the package between the two statements.
+                writer.replace_source(&sid("pacman"), &[]).unwrap();
+                let keys = ix.keys_of(&found)?;
+                let members = ix.members("htop")?;
+                Ok((found, keys, members))
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(keys, ["htop"], "the read keeps its snapshot");
+        assert_eq!(members.len(), 1);
+        // Outside the read, the change is visible.
+        assert!(reader.search_in("htop", 10, None).unwrap().is_empty());
+        assert!(reader.keys_of(&found).unwrap().is_empty());
+    }
+
+    #[test]
+    fn members_returns_every_source() {
+        let idx = multi(&[
+            pkg("pacman", "htop", "x"),
+            pkg("aur", "htop", "x"),
+            pkg("pacman", "other", "x"),
+        ]);
+        let got: Vec<(String, String)> = idx
+            .members("htop")
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.source.to_string(), p.name))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("aur".into(), "htop".into()),
+                ("pacman".into(), "htop".into())
+            ]
+        );
+        assert!(idx.members("nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_counts_counts_each_source() {
+        let idx = multi(&[
+            pkg("pacman", "a", "x"),
+            pkg("pacman", "b", "x"),
+            pkg("aur", "c", "x"),
+        ]);
+        assert_eq!(
+            idx.source_counts().unwrap(),
+            [(sid("aur"), 1), (sid("pacman"), 2)]
+        );
+    }
+
+    fn popular(name: &str, popularity: Option<f64>) -> Package {
+        Package {
+            popularity,
+            ..pkg("aur", name, "x")
+        }
+    }
+
+    #[test]
+    fn featured_aur_orders_by_popularity() {
+        let idx = multi(&[
+            popular("low", Some(1.0)),
+            popular("none", None),
+            popular("high", Some(9.0)),
+            popular("mid", Some(5.0)),
+        ]);
+        let got = names(idx.featured(&sid("aur"), 3, 7).unwrap());
+        assert_eq!(got, ["high", "mid", "low"]);
+        let all = names(idx.featured(&sid("aur"), 10, 7).unwrap());
+        assert_eq!(all.last().unwrap(), "none");
+    }
+
+    fn with_icon(source: &str, name: &str) -> Package {
+        Package {
+            icon: Some(format!("/icons/{name}.png")),
+            ..pkg(source, name, "x")
+        }
+    }
+
+    #[test]
+    fn featured_prefers_packages_with_icons() {
+        let idx = multi(&[
+            pkg("pacman", "a", "x"),
+            with_icon("pacman", "b"),
+            pkg("pacman", "c", "x"),
+            with_icon("pacman", "d"),
+        ]);
+        let mut got = names(idx.featured(&sid("pacman"), 10, 1).unwrap());
+        got.sort();
+        assert_eq!(got, ["b", "d"]);
+    }
+
+    #[test]
+    fn featured_is_stable_for_a_seed_and_varies_between_seeds() {
+        let many: Vec<Package> = (0..50)
+            .map(|i| with_icon("pacman", &format!("app{i:02}")))
+            .collect();
+        let idx = multi(&many);
+        let pacman = sid("pacman");
+        let first = names(idx.featured(&pacman, 10, 42).unwrap());
+        assert_eq!(first.len(), 10);
+        assert_eq!(first, names(idx.featured(&pacman, 10, 42).unwrap()));
+        let others: Vec<Vec<String>> = (0..5)
+            .map(|s| names(idx.featured(&pacman, 10, s).unwrap()))
+            .collect();
+        assert!(others.iter().any(|o| *o != first));
+        assert!(others.iter().any(|o| *o != others[0]));
+    }
+
+    #[test]
+    fn featured_falls_back_when_no_icons() {
+        let idx = multi(&[
+            pkg("pacman", "c", "x"),
+            pkg("pacman", "a", "x"),
+            pkg("pacman", "b", "x"),
+        ]);
+        assert_eq!(
+            names(idx.featured(&sid("pacman"), 2, 3).unwrap()),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn upgradable_lists_only_flagged_packages() {
+        let up = |source: &str, name: &str| Package {
+            upgradable: true,
+            ..pkg(source, name, "x")
+        };
+        let idx = multi(&[
+            up("pacman", "zed"),
+            pkg("pacman", "calm", "x"),
+            up("aur", "zed"),
+            up("pacman", "abc"),
+        ]);
+        let got: Vec<(String, String)> = idx
+            .upgradable()
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.name, p.source.to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("abc".into(), "pacman".into()),
+                ("zed".into(), "aur".into()),
+                ("zed".into(), "pacman".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn v3_index_gains_the_links_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE packages (id INTEGER PRIMARY KEY, source TEXT NOT NULL,
+                     name TEXT NOT NULL, UNIQUE (source, name));
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let mut idx = Index::open(&path).unwrap();
+        idx.replace_source(&sid("a"), &[pkg("a", "x", "d")])
+            .unwrap();
+        assert_eq!(idx.keys_of(&[pkg("a", "x", "d")]).unwrap(), ["x"]);
+    }
+
+    /// 150k synthetic packages in three sources; prints the cost of the link rebuild.
+    #[test]
+    #[ignore]
+    fn rebuild_links_timing() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let make = |source: &str, n: usize, with_ids: bool| -> Vec<Package> {
+            (0..n)
+                .map(|i| Package {
+                    // Names repeat across sources, so links actually merge.
+                    app_id: (with_ids && i % 3 == 0).then(|| format!("org.example.App{i}")),
+                    ..pkg(source, &format!("pkg-{i}"), "synthetic")
+                })
+                .collect()
+        };
+        let started = std::time::Instant::now();
+        idx.replace_source(&sid("pacman"), &make("pacman", 15_000, true))
+            .unwrap();
+        idx.replace_source(&sid("flatpak"), &make("flatpak", 5_000, true))
+            .unwrap();
+        let aur = make("aur", 130_000, false);
+        let t = std::time::Instant::now();
+        idx.replace_source(&sid("aur"), &aur).unwrap();
+        let replace = t.elapsed();
+        let t = std::time::Instant::now();
+        idx.rebuild_links().unwrap();
+        let rebuild = t.elapsed();
+        println!(
+            "count {} | replace_source(aur, 130k, includes link rebuild) {replace:?} | rebuild_links {rebuild:?} | all {:?}",
+            idx.count().unwrap(),
+            started.elapsed()
+        );
     }
 }

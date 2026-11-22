@@ -1,0 +1,48 @@
+import { Theme } from "theme.slint";
+import { Card, CardData } from "card.slint";
+
+export struct RowData {
+    title: string,
+    cards: [CardData],
+}
+
+// A titled row with a thin line, and as many cards as fit in `columns`.
+// Size contract: every card of `data.cards` is instantiated (those past `columns` are only
+// hidden), so rows are expected to hold at most ~14 cards. Larger lists need slicing in the host.
+export component Row inherits Rectangle {
+    in property <RowData> data;
+    in property <int> columns: 1;
+    callback card-clicked(string);
+
+    height: Theme.row-header-height + Theme.card-height;
+
+    HorizontalLayout {
+        y: 0;
+        height: Theme.row-header-height;
+        spacing: 12px;
+        Text {
+            text: root.data.title;
+            color: Theme.text;
+            font-size: Theme.font-title;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 1px;
+                background: Theme.line;
+            }
+        }
+    }
+
+    for card[i] in root.data.cards: Card {
+        visible: i < root.columns;
+        x: i * (Theme.card-width + Theme.card-gap);
+        y: Theme.row-header-height;
+        data: card;
+        clicked(key) => {
+            root.card-clicked(key);
+        }
+    }
+}

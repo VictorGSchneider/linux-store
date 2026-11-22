@@ -10,8 +10,17 @@ Cargo workspace: `core/` (package `store-core`; not named `core`, which would co
 `core`), `backends/pacman/`, `backends/aur/` and `backends/flatpak/` (packages
 `store-backend-pacman`, `-aur`, `-flatpak`), `cli/` (package `store-cli`, binary
 `store`), `protocol/` (`store-protocol`), `helper/` (`store-helper`, the only code that runs as
-root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/` and `gui/` (the Slint app).
-Planned: more `backends/*`.
+root), `installers/pkexec/` (`store-installer-pkexec`), `packaging/`, `appstream/`
+(`store-appstream`, AppStream parsing; the app/package matching is `rebuild_links_in` in
+`core/src/index.rs`), `system/` (`store-system`: the
+real backends and installer, shared by CLI and GUI), `app/` (`store-app`: the `Engine`, which owns
+the index and the installer and runs everything slow on its own threads: query, refresh, operations
+and two icon decoders; the UI sends `Command`s and gets `Event`s) and `gui/` (package
+`linux-store`: a library, `linux_store`, with `convert`, `state` and `wiring`; the binary; the
+`examples/` and the `.slint` files in `gui/ui/`).
+Planned: more `backends/*`. GUI design and plan: `docs/2026-11-21-gui-design.md` and
+`docs/2026-11-21-gui-round1-plan.md` (round 1 is done; categories, sidebar, settings and the
+Flatpak/AUR installers are round 2+).
 Run the core's tests with `cargo test --workspace --features store-core/testing`.
 
 ## The privileged helper: never run it from an agent
@@ -26,11 +35,32 @@ Build the helper with `--release`: the `alpm` crate trips an alignment check in 
 environment variable that exposes them.
 `legacy/` holds the old bash `stoa-store`; use it as reference only.
 
+## Rules for agents working on the GUI
+
+- Never run the GUI with the default renderer (see the freeze below), and never start an install,
+  remove or upgrade from it. Look at the UI through the headless examples in `gui/examples/`
+  (each doc comment has its command, e.g. `SLINT_BACKEND=headless cargo run -p linux-store
+  --example fake_ops --features slint/mcp -- OUT_DIR`), which write PNGs you can Read.
+- Examples and tests use fakes only (`store_core::testing`: `FakeBackend`, `FakeInstaller`) and
+  NEVER construct the real installer. Only `gui/src/main.rs` builds it.
+- A real-engine run (`live_snapshot`) must use a temporary `XDG_CACHE_HOME`; the first refresh
+  downloads the AUR dump. Its snapshots show this machine's installed packages: do not commit them.
+  The README's `home.png` and `app-page.png` come from `readme_shots` (real catalogs, no installed
+  state), `installeds.png` from `fake_lists` (cropped to 1000x440). Never edit their pixels.
+- Arch's AppStream icons are JPEG XL (`.jxl`), decoded with `jxl-oxide` in `app/src/icons.rs`
+  (PNG too); an icon that fails to decode falls back to a letter tile.
+- Size contracts are in the headers of `gui/ui/row.slint`, `home-page.slint` and `list-page.slint`
+  (rows and home are not virtualised; the lists instantiate only the visible cards, because
+  positions past ~32000 px break the software renderer). Read them before changing those pages.
+- Manual verification with the real helper is `packaging/manual-gui-check.md`, run by the user only.
+
 ## Install the Slint Plugin
 
 Before you work on the UI, install the Slint plugin from [slint-ui/ai-plugins](https://github.com/slint-ui/ai-plugins).
 It teaches you the `.slint` language and its pitfalls.
 It also lets you search the documentation, and lets you render and drive the running UI.
+(Some agent sessions already have it; check before suggesting the install. Driving the running
+app is subject to the renderer and no-install rules above and below.)
 If it isn't installed, suggest that the user install it:
 
 ```sh
@@ -48,9 +78,11 @@ npx skills add slint-ui/ai-plugins --skill slint
 
 ## Before you push
 
-CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings`, the tests and a GUI compile check.
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings`, the tests, and for the GUI
+a compile check of all targets (examples included) and its unit tests.
 Run the same locally: `cargo fmt --all --check`, `cargo clippy --workspace --exclude linux-store --all-targets --features store-core/testing -- -D warnings`,
-`cargo test --workspace --exclude linux-store --features store-core/testing`.
+`cargo test --workspace --exclude linux-store --features store-core/testing`,
+`cargo check --locked -p linux-store --all-targets`, `cargo test --locked -p linux-store`.
 
 ## Documentation
 
@@ -63,6 +95,9 @@ language and API questions instead of relying on memory.
 cargo build
 cargo run
 ```
+
+On the main dev laptop `cargo run` of the GUI must use one of the safe renderer settings from the
+Known issue section below; agents never run it (they use the headless examples).
 
 ## Known issue: plain `cargo run` can freeze the dev machine
 
@@ -84,7 +119,8 @@ Use one of these on that machine until the NVIDIA/EGL problem is understood.
 
 ## Live Preview
 
-While you work on the UI, build and run the application with live preview.
+While you work on the UI, build and run the application with live preview
+(on the owner's machine, with the safe renderer settings above; agents use the headless examples instead).
 It compiles much faster, because the `.slint` files aren't compiled to native code.
 
 ```sh
@@ -102,6 +138,10 @@ Use live preview only during development, and keep it out of the build files.
 
 - Check `.slint` changes without a full build with `slint-viewer --check .`.
 - Look at a render before you call UI work done:
-  use the plugin's preview, or a screenshot of the live-preview application.
+  use the plugin's preview, or a screenshot of the live-preview application (owner's machine);
+  agents Read the PNGs the headless examples in `gui/examples/` write.
 - When the UI changes visibly, update the screenshots in `README.md`.
 - Format changed `.slint` files with `slint-lsp format -i <file>`.
+- If `slint-viewer`/`slint-lsp` are not installed (as in the agent sandbox so far),
+  `cargo check -p linux-store --all-targets` is the compile check and the headless examples are
+  the way to look at the UI.

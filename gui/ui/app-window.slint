@@ -1,17 +1,169 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Theme, TextUtil } from "theme.slint";
+import { CardData } from "card.slint";
+import { ChipData } from "chip.slint";
+import { RowData } from "row.slint";
+import { TopBar } from "top-bar.slint";
+import { HomePage } from "home-page.slint";
+import { ListPage, EmptyKind } from "list-page.slint";
+import { AppPage, AppPageData, SourceButtonData } from "app-page.slint";
+import { OperationBar } from "operation-bar.slint";
+
+export { EmptyKind, CardData, ChipData, RowData, TextUtil, AppPageData, SourceButtonData }
+
+// Which page shows below the top bar. Home keeps its rows and results while the app page shows.
+export enum Page {
+    home,
+    app,
+    installed,
+    updates,
+}
 
 export component AppWindow inherits Window {
-    in-out property <int> counter: 42;
-    callback request-increase-value();
-    VerticalBox {
-        Text {
-            text: "Counter: \{root.counter}";
+    in property <[ChipData]> chips;
+    in property <[RowData]> rows;
+    in property <[CardData]> results;
+    in property <bool> searching;
+    in-out property <string> query;
+    in-out property <Page> page: Page.home;
+    in property <AppPageData> app-page;
+    // the Installeds and Updates lists, their "(12)" counts and what an empty one says
+    in property <[CardData]> installed;
+    in property <string> installed-count;
+    in property <EmptyKind> installed-empty;
+    in property <[CardData]> updates;
+    in property <string> updates-count;
+    in property <EmptyKind> updates-empty;
+    // the keyboard selection of the visible list page (-1: none); reset whenever the page changes
+    in-out property <int> list-selected: -1;
+    changed page => {
+        root.list-selected = -1;
+    }
+    // an install or remove is running
+    in property <bool> op-active;
+    // the last operation ended; its source is being reloaded, the page buttons wait
+    in property <bool> op-settling;
+    // a refresh is running (some source is being reloaded)
+    in property <bool> refreshing;
+    in property <string> op-message;
+    // 0..100, or -1 when the operation reports no percentage
+    in property <int> op-percent: -1;
+    // the last operation's result or error, shown on the app page
+    in property <string> op-status;
+    in property <bool> op-status-error;
+    // the app a click asked for is not in the catalog (any more): a short note on the home page
+    in property <bool> app-missing;
+    callback search-edited(string);
+    callback chip-clicked(string);
+    callback card-clicked(string);
+    callback show-installed();
+    callback show-updates();
+    callback show-home();
+    callback back();
+    callback install-clicked(string);
+    callback remove-clicked(string);
+    callback cancel-clicked();
+    callback open-link(string);
+
+    title: @tr("Linux Store");
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    min-width: 480px;
+    min-height: 400px;
+    background: Theme.background;
+
+    VerticalLayout {
+        TopBar {
+            chips: root.chips;
+            query <=> root.query;
+            search-edited(text) => {
+                root.page = Page.home;
+                root.search-edited(text);
+            }
+            chip-clicked(source) => {
+                root.page = Page.home;
+                root.chip-clicked(source);
+            }
+            show-installed => {
+                root.page = Page.installed;
+                root.show-installed();
+            }
+            show-updates => {
+                root.page = Page.updates;
+                root.show-updates();
+            }
+            show-home => {
+                root.page = Page.home;
+                root.show-home();
+            }
         }
 
-        Button {
-            text: "Increase value";
-            clicked => {
-                root.request-increase-value();
+        if root.page == Page.home && root.app-missing: Text {
+            text: @tr("This app is no longer in the catalog.");
+            color: Theme.text-dim;
+            font-size: Theme.font-body;
+            horizontal-alignment: center;
+            accessible-role: text;
+        }
+
+        if root.page == Page.home: HomePage {
+            rows: root.rows;
+            results: root.results;
+            searching: root.searching;
+            refreshing: root.refreshing;
+            query-active: root.query != "";
+            card-clicked(key) => {
+                root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.installed: ListPage {
+            title: @tr("Installeds");
+            count-text: root.installed-count;
+            cards: root.installed;
+            empty: root.installed-empty;
+            selected <=> root.list-selected;
+            card-clicked(key) => {
+                root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.updates: ListPage {
+            title: @tr("Updates");
+            count-text: root.updates-count;
+            note: @tr("Updates are listed for pacman only");
+            cards: root.updates;
+            empty: root.updates-empty;
+            selected <=> root.list-selected;
+            card-clicked(key) => {
+                root.card-clicked(key);
+            }
+        }
+
+        if root.page == Page.app: AppPage {
+            data: root.app-page;
+            busy: root.op-active;
+            settling: root.op-settling;
+            status: root.op-status;
+            status-error: root.op-status-error;
+            back => {
+                root.back();
+            }
+            install-clicked(source) => {
+                root.install-clicked(source);
+            }
+            remove-clicked(source) => {
+                root.remove-clicked(source);
+            }
+            open-link(url) => {
+                root.open-link(url);
+            }
+        }
+
+        if root.op-active: OperationBar {
+            message: root.op-message;
+            percent: root.op-percent;
+            cancel-clicked => {
+                root.cancel-clicked();
             }
         }
     }

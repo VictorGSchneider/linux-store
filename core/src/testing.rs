@@ -14,6 +14,11 @@ pub fn pkg(source: &str, name: &str, description: &str) -> Package {
         url: None,
         download_size: 0,
         installed_size: 0,
+        app_id: None,
+        categories: Vec::new(),
+        icon: None,
+        popularity: None,
+        upgradable: false,
     }
 }
 

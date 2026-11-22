@@ -1,0 +1,252 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme, TextUtil } from "theme.slint";
+import { PillButton } from "pill-button.slint";
+
+export struct SourceButtonData {
+    source: string,
+    version: string,
+    installed: bool,
+    enabled: bool,
+    reason: string,
+}
+
+export struct AppPageData {
+    title: string,
+    description: string,
+    icon: image,
+    has-icon: bool,
+    accent: color,
+    size: string,
+    homepage: string,
+    sources: [SourceButtonData],
+}
+
+// One row per source: its name and version, and one button (Install, or Remove when installed).
+component SourceRow inherits Rectangle {
+    in property <SourceButtonData> data;
+    // an operation is running: every button waits
+    in property <bool> busy;
+    // the last operation ended but the page does not show its result yet: every button waits
+    in property <bool> settling;
+    callback install-clicked(string);
+    callback remove-clicked(string);
+
+    background: Theme.surface;
+    border-radius: Theme.radius-visual;
+    preferred-height: lay.preferred-height;
+
+    lay := HorizontalLayout {
+        padding: 12px;
+        spacing: 16px;
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+            Text {
+                text: root.data.source;
+                color: Theme.text;
+                font-size: Theme.font-title;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.data.installed ? @tr("Installed version {}", root.data.version) : @tr("Version {}", root.data.version);
+                color: Theme.text-dim;
+                font-size: Theme.font-body;
+                overflow: elide;
+            }
+
+            if root.data.reason != "": Text {
+                // the host sends the English text; the known reason is translated here
+                text: root.data.reason == "no installer for this source yet" ? @tr("no installer for this source yet") : root.data.reason;
+                color: Theme.text-dim;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+            }
+        }
+
+        PillButton {
+            y: (parent.height - self.height) / 2;
+            text: root.settling && root.data.enabled ? @tr("Updating…") : root.data.installed ? @tr("Remove") : @tr("Install");
+            description: root.settling && root.data.enabled ? @tr("Waiting for the package list to update") : root.data.installed ? @tr("Remove {}, version {}", root.data.source, root.data.version) : @tr("Install from {}, version {}", root.data.source, root.data.version);
+            enabled: root.data.enabled && !root.busy && !root.settling;
+            subdued: root.data.installed;
+            clicked => {
+                if root.data.installed {
+                    root.remove-clicked(root.data.source);
+                } else {
+                    root.install-clicked(root.data.source);
+                }
+            }
+        }
+    }
+}
+
+// A small Tab-reachable text button (Back, the homepage link).
+component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    width: label.preferred-width + 16px;
+    height: 32px;
+    border-radius: 6px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    label := Text {
+        text: root.text;
+        color: Theme.focus-ring;
+        font-size: Theme.font-body;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-color: Theme.focus-ring;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component AppPage inherits Rectangle {
+    in property <AppPageData> data;
+    in property <bool> busy;
+    in property <bool> settling;
+    // the last operation's result or error, shown as plain text
+    in property <string> status;
+    in property <bool> status-error;
+    callback back();
+    callback install-clicked(string);
+    callback remove-clicked(string);
+    callback open-link(string);
+
+    private property <length> content-width: min(self.width, 760px) - 2 * Theme.page-padding;
+
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+
+        HorizontalLayout {
+            alignment: center;
+            padding-top: 12px;
+            padding-bottom: Theme.page-padding;
+            VerticalLayout {
+                width: root.content-width;
+                spacing: 16px;
+                alignment: start;
+
+                HorizontalLayout {
+                    alignment: start;
+                    LinkButton {
+                        text: @tr("← Back");
+                        clicked => {
+                            root.back();
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 20px;
+                    Rectangle {
+                        width: Theme.page-icon-size;
+                        height: Theme.page-icon-size;
+                        border-radius: Theme.radius-card;
+                        background: root.data.has-icon ? transparent : root.data.accent;
+                        clip: true;
+                        if root.data.has-icon: Image {
+                            source: root.data.icon;
+                            width: parent.width;
+                            height: parent.height;
+                            image-fit: contain;
+                        }
+                        if !root.data.has-icon: Text {
+                            text: TextUtil.initial(root.data.title);
+                            color: Theme.on-accent;
+                            font-size: 48px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        Text {
+                            text: root.data.title;
+                            color: Theme.text;
+                            font-size: Theme.font-page-title;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                            accessible-role: text;
+                        }
+
+                        Text {
+                            text: @tr("Size: {}", root.data.size);
+                            color: Theme.text-dim;
+                            font-size: Theme.font-body;
+                        }
+
+                        if root.data.homepage != "": HorizontalLayout {
+                            alignment: start;
+                            LinkButton {
+                                text: root.data.homepage;
+                                clicked => {
+                                    root.open-link(root.data.homepage);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.data.description != "" ? root.data.description : @tr("No description available.");
+                    color: root.data.description != "" ? Theme.text : Theme.text-dim;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                }
+
+                for source in root.data.sources: SourceRow {
+                    data: source;
+                    busy: root.busy;
+                    settling: root.settling;
+                    install-clicked(s) => {
+                        root.install-clicked(s);
+                    }
+                    remove-clicked(s) => {
+                        root.remove-clicked(s);
+                    }
+                }
+
+                if root.status != "": Text {
+                    text: root.status;
+                    color: root.status-error ? Theme.error : Theme.text-dim;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                    accessible-role: text;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,872 @@
+//! The engine behind the GUI: it owns the index and the installer and does every slow thing off
+//! the UI thread. The UI sends [`Command`]s and gets [`Event`]s back through a callback.
+//!
+//! Threads, each fed by its own channel (`Engine::send` routes, never blocks):
+//! - query: a `Catalog` connection; answers `Chips`, `Home`, `Search`, `Open`, `Installed`,
+//!   `Updates`, coalescing searches that queued up behind one another;
+//! - refresh: the `Store` (the only writer) and a `Catalog` for the chip counts afterwards;
+//! - operations: one install or remove at a time, in order; it asks the refresh thread to reload
+//!   the affected source when an operation ends. That reload does not wait for a running full
+//!   refresh: the refresh thread takes it in the middle of the pass (see
+//!   `Store::refresh_with_more`) and sends `OperationSettled` once the source is written;
+//! - two icon threads decoding icon files.
+//!
+//! `CancelOperation` is handled in `send` itself, so it reaches the running operation instead of
+//! waiting behind it. Dropping the `Engine` stops and joins every thread.
+use std::cell::{Cell, RefCell};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use store_core::{
+    App, Backend, CancelToken, Catalog, Host, Index, InstallError, Installer, Outcome,
+    RefreshStage, Row, SourceId, Store,
+};
+use store_protocol::{ChangeKind, ErrorCode, Request, Stage};
+
+use crate::icons::{self, Rgba};
+
+/// Most apps one search returns.
+const SEARCH_LIMIT: usize = 100;
+
+const ICON_THREADS: usize = 2;
+
+pub struct EngineConfig {
+    pub db_path: PathBuf,
+    pub backends: Vec<Box<dyn Backend>>,
+    pub installer: Arc<dyn Installer>,
+    /// Sources the installer can install from and remove from.
+    pub installable: Vec<SourceId>,
+    pub host: Host,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Chips,
+    Home {
+        per_row: usize,
+        seed: u64,
+    },
+    Search {
+        generation: u64,
+        query: String,
+        source: Option<SourceId>,
+    },
+    Open {
+        key: String,
+    },
+    Installed,
+    Updates,
+    /// Reloads every source.
+    Refresh,
+    /// `package` is the name of the variant the page showed for `source`; the operation is
+    /// refused when the index now holds another one (the page is stale).
+    Install {
+        key: String,
+        source: SourceId,
+        package: String,
+    },
+    Remove {
+        key: String,
+        source: SourceId,
+        package: String,
+    },
+    /// Cancels the running operation, if any. Queued operations are not affected.
+    CancelOperation,
+    LoadIcon {
+        path: String,
+        /// The size the icon will be shown at; informational for now.
+        side: u32,
+    },
+}
+
+/// An app page: the app and which of its sources the installer can act on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppView {
+    pub app: App,
+    pub installable: Vec<SourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshState {
+    Started,
+    Updated(usize),
+    Unavailable(Option<String>),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpState {
+    Started(String),
+    Progress {
+        message: String,
+        percent: Option<u8>,
+    },
+    /// Sent exactly once for every `Install` and `Remove`, whatever happened.
+    Finished(Result<String, String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    Chips(Vec<(SourceId, usize)>),
+    Home(Vec<Row>),
+    SearchResults {
+        generation: u64,
+        apps: Vec<App>,
+    },
+    AppPage(Option<AppView>),
+    Installed(Vec<App>),
+    Updates(Vec<App>),
+    Refresh {
+        source: SourceId,
+        state: RefreshState,
+    },
+    /// Ends every refresh, including the one that follows an operation.
+    RefreshDone,
+    Operation(OpState),
+    /// Sent exactly once for every `Install` and `Remove`, after its `Finished`: the index now
+    /// holds the affected source as it is after the operation (or the reload failed), so a
+    /// page asked for from now on shows the result. Sent right after `Finished` when the
+    /// installer never ran. Operations are settled in the order they finished.
+    OperationSettled,
+    Icon {
+        path: String,
+        image: Option<Arc<Rgba>>,
+    },
+    Error(String),
+}
+
+/// From several `Search` commands keeps only the last one, where it was; every other command
+/// keeps its place.
+pub fn coalesce(commands: Vec<Command>) -> Vec<Command> {
+    let last_search = commands
+        .iter()
+        .rposition(|c| matches!(c, Command::Search { .. }));
+    commands
+        .into_iter()
+        .enumerate()
+        .filter(|(i, c)| !matches!(c, Command::Search { .. }) || Some(*i) == last_search)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+type Callback = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// Calls the UI's callback. A panic in it must not take an engine thread down with it.
+fn emit(on_event: &Callback, event: Event) {
+    let _ = catch_unwind(AssertUnwindSafe(|| on_event(event)));
+}
+
+enum RefreshJob {
+    All,
+    /// Reloads one source after an operation; `OperationSettled` follows once it is written.
+    AfterOperation(SourceId),
+}
+
+enum OpKind {
+    Install,
+    Remove,
+}
+
+struct OpJob {
+    kind: OpKind,
+    key: String,
+    source: SourceId,
+    package: String,
+}
+
+struct Channels {
+    query: Sender<Command>,
+    refresh: Sender<RefreshJob>,
+    operations: Sender<OpJob>,
+    icons: Sender<String>,
+}
+
+/// State shared by `Engine` and its threads.
+struct Shared {
+    /// Set once, when the engine is dropped: threads stop taking new work.
+    stopping: AtomicBool,
+    /// The running operation's token. `stopping` is set while holding this lock, so an operation
+    /// either sees `stopping` before it starts or has its token cancelled by the drop.
+    running: Mutex<Option<CancelToken>>,
+}
+
+impl Shared {
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    fn running(&self) -> MutexGuard<'_, Option<CancelToken>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// How long `Drop` waits for a running refresh before leaving its thread behind. A backend
+/// download cannot be cancelled, and the index is only a cache: SQLite rolls back a write that
+/// the process exit cuts off.
+const REFRESH_WAIT: Duration = Duration::from_secs(1);
+
+/// How long `Drop` waits for the operations thread after cancelling the running operation, so an
+/// in-flight package commit can end. An open authentication dialog would otherwise hold it.
+const OPERATION_WAIT: Duration = Duration::from_secs(10);
+
+/// How `Drop` waits for a thread.
+enum Wait {
+    Join,
+    Refresh,
+    Operations,
+}
+
+struct Worker {
+    handle: JoinHandle<()>,
+    wait: Wait,
+    /// Disconnects when the thread's work has returned (or panicked).
+    done: Receiver<()>,
+}
+
+pub struct Engine {
+    channels: Option<Channels>,
+    shared: Arc<Shared>,
+    workers: Vec<Worker>,
+    operation_wait: Duration,
+}
+
+impl Engine {
+    /// Opens the index at `config.db_path` (creating its directory) and starts the threads.
+    /// Nothing is refreshed until a `Command::Refresh` arrives.
+    /// `on_event` must not own the `Engine`: dropping it from an engine thread would deadlock.
+    pub fn start(
+        config: EngineConfig,
+        on_event: impl Fn(Event) + Send + Sync + 'static,
+    ) -> Result<Engine, store_core::Error> {
+        let EngineConfig {
+            db_path,
+            backends,
+            installer,
+            installable,
+            host,
+        } = config;
+        if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        // The writer opens first, so it is the one that creates or migrates the schema.
+        let store = Store::new(Index::open(&db_path)?, backends).with_host(host.clone());
+        let refresh_catalog = Catalog::open(&db_path, host.clone())?;
+        let query_catalog = Catalog::open(&db_path, host.clone())?;
+        let ops_catalog = Catalog::open(&db_path, host)?;
+
+        let on_event: Callback = Arc::new(on_event);
+        let (query_tx, query_rx) = channel();
+        let (refresh_tx, refresh_rx) = channel();
+        let (ops_tx, ops_rx) = channel();
+        let (icons_tx, icons_rx) = channel();
+        let ops_refresh = refresh_tx.clone();
+        let mut engine = Engine {
+            channels: Some(Channels {
+                query: query_tx,
+                refresh: refresh_tx,
+                operations: ops_tx,
+                icons: icons_tx,
+            }),
+            shared: Arc::new(Shared {
+                stopping: AtomicBool::new(false),
+                running: Mutex::new(None),
+            }),
+            workers: Vec::new(),
+            operation_wait: OPERATION_WAIT,
+        };
+
+        // On a spawn error, returning drops `engine`, which joins the threads already started.
+        let (shared, cb) = (engine.shared.clone(), on_event.clone());
+        let query = Queries {
+            catalog: query_catalog,
+            installable: installable.clone(),
+        };
+        engine.spawn("store-query", Wait::Join, move || {
+            query.run(query_rx, &shared, &cb)
+        })?;
+        let (shared, cb) = (engine.shared.clone(), on_event.clone());
+        engine.spawn("store-refresh", Wait::Refresh, move || {
+            refresh_loop(store, refresh_catalog, refresh_rx, &shared, &cb)
+        })?;
+        let (shared, cb) = (engine.shared.clone(), on_event.clone());
+        let operations = Operations {
+            catalog: ops_catalog,
+            installer,
+            installable,
+            refresh: ops_refresh,
+        };
+        engine.spawn("store-operations", Wait::Operations, move || {
+            operations.run(ops_rx, &shared, &cb)
+        })?;
+        let icons_rx = Arc::new(Mutex::new(icons_rx));
+        for n in 0..ICON_THREADS {
+            let (shared, cb, rx) = (engine.shared.clone(), on_event.clone(), icons_rx.clone());
+            engine.spawn(&format!("store-icons-{n}"), Wait::Join, move || {
+                icon_loop(&rx, &shared, &cb)
+            })?;
+        }
+        Ok(engine)
+    }
+
+    fn spawn(
+        &mut self,
+        name: &str,
+        wait: Wait,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (done_tx, done) = channel::<()>();
+        let handle = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                // Dropped after `work` returns or unwinds, which disconnects `done`.
+                let _done = done_tx;
+                work();
+            })?;
+        self.workers.push(Worker { handle, wait, done });
+        Ok(())
+    }
+
+    /// Hands `command` to the thread that does it. Never blocks; a command the engine can no
+    /// longer take is dropped.
+    pub fn send(&self, command: Command) {
+        let Some(channels) = &self.channels else {
+            return;
+        };
+        // A send only fails when the receiving thread is gone; the command is dropped then.
+        match command {
+            Command::Refresh => {
+                let _ = channels.refresh.send(RefreshJob::All);
+            }
+            Command::Install {
+                key,
+                source,
+                package,
+            } => {
+                let kind = OpKind::Install;
+                let _ = channels.operations.send(OpJob {
+                    kind,
+                    key,
+                    source,
+                    package,
+                });
+            }
+            Command::Remove {
+                key,
+                source,
+                package,
+            } => {
+                let kind = OpKind::Remove;
+                let _ = channels.operations.send(OpJob {
+                    kind,
+                    key,
+                    source,
+                    package,
+                });
+            }
+            Command::CancelOperation => {
+                if let Some(token) = self.shared.running().as_ref() {
+                    token.cancel();
+                }
+            }
+            Command::LoadIcon { path, side: _ } => {
+                let _ = channels.icons.send(path);
+            }
+            query => {
+                let _ = channels.query.send(query);
+            }
+        }
+    }
+}
+
+/// Queued operations and refreshes are discarded; the refresh and operations threads are waited
+/// for only a bounded time (`REFRESH_WAIT`, `OPERATION_WAIT`) and then left to end on their own.
+impl Drop for Engine {
+    fn drop(&mut self) {
+        {
+            let running = self.shared.running();
+            self.shared.stopping.store(true, Ordering::SeqCst);
+            if let Some(token) = running.as_ref() {
+                token.cancel();
+            }
+        }
+        // Closing the channels ends every thread's receive loop.
+        self.channels = None;
+        for worker in self.workers.drain(..) {
+            let limit = match worker.wait {
+                Wait::Join => None,
+                Wait::Refresh => Some(REFRESH_WAIT),
+                Wait::Operations => Some(self.operation_wait),
+            };
+            if let Some(limit) = limit
+                && let Err(RecvTimeoutError::Timeout) = worker.done.recv_timeout(limit)
+            {
+                // Still busy: leave it detached. It only touches what it owns and its own
+                // clones of the callback and the shared state, and stops taking work.
+                continue;
+            }
+            // A thread only ends by panicking if `emit`'s guard failed; nothing to do then.
+            let _ = worker.handle.join();
+        }
+    }
+}
+
+struct Queries {
+    catalog: Catalog,
+    installable: Vec<SourceId>,
+}
+
+impl Queries {
+    fn run(&self, commands: Receiver<Command>, shared: &Shared, on_event: &Callback) {
+        while let Ok(first) = commands.recv() {
+            let mut batch = vec![first];
+            batch.extend(commands.try_iter());
+            for command in coalesce(batch) {
+                if shared.stopping() {
+                    return;
+                }
+                let answer = catch_unwind(AssertUnwindSafe(|| self.answer(command)))
+                    .unwrap_or_else(|_| Some(Err("internal error: a query panicked".to_string())));
+                match answer {
+                    Some(Ok(event)) => emit(on_event, event),
+                    Some(Err(message)) => emit(on_event, Event::Error(message)),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn answer(&self, command: Command) -> Option<Result<Event, String>> {
+        let c = &self.catalog;
+        let result = match command {
+            Command::Chips => c.chips().map(Event::Chips),
+            Command::Home { per_row, seed } => c.home(per_row, seed).map(Event::Home),
+            Command::Search {
+                generation,
+                query,
+                source,
+            } => c
+                .search(&query, source.as_ref(), SEARCH_LIMIT)
+                .map(|apps| Event::SearchResults { generation, apps }),
+            Command::Open { key } => c.app(&key).map(|app| {
+                Event::AppPage(app.map(|app| {
+                    AppView {
+                        installable: app
+                            .variants
+                            .iter()
+                            .map(|p| p.source.clone())
+                            .filter(|s| self.installable.contains(s))
+                            .collect(),
+                        app,
+                    }
+                }))
+            }),
+            Command::Installed => c.installed().map(Event::Installed),
+            Command::Updates => c.updates().map(Event::Updates),
+            // `Engine::send` routes the others elsewhere.
+            _ => return None,
+        };
+        Some(result.map_err(|e| e.to_string()))
+    }
+}
+
+/// An operation waiting for its source to be reloaded. `started` turns true when a collection
+/// of that source starts after the request: only such a collection reflects the operation.
+struct Settle {
+    source: SourceId,
+    started: bool,
+}
+
+fn refresh_loop(
+    mut store: Store,
+    catalog: Catalog,
+    jobs: Receiver<RefreshJob>,
+    shared: &Shared,
+    on_event: &Callback,
+) {
+    // A full refresh asked for during a pass runs after it (once, however often it was asked).
+    let full_later = Cell::new(false);
+    let settles: RefCell<Vec<Settle>> = RefCell::new(Vec::new());
+    // Takes the reloads that operations asked for; remembers full refreshes for later.
+    let take = |job: RefreshJob| -> Option<SourceId> {
+        match job {
+            RefreshJob::All => {
+                full_later.set(true);
+                None
+            }
+            RefreshJob::AfterOperation(source) => {
+                settles.borrow_mut().push(Settle {
+                    source: source.clone(),
+                    started: false,
+                });
+                Some(source)
+            }
+        }
+    };
+    loop {
+        let only = if full_later.replace(false) {
+            None
+        } else {
+            let Ok(job) = jobs.recv() else { return };
+            match take(job) {
+                None => {
+                    full_later.set(false);
+                    None
+                }
+                Some(source) => Some(vec![source]),
+            }
+        };
+        if shared.stopping() {
+            return;
+        }
+        let more = || jobs.try_iter().filter_map(&take).collect::<Vec<_>>();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            store.refresh_with_more(
+                only.as_deref(),
+                &|source, stage| {
+                    let state = match stage {
+                        RefreshStage::Started => RefreshState::Started,
+                        RefreshStage::Finished(Outcome::Updated { packages }) => {
+                            RefreshState::Updated(*packages)
+                        }
+                        RefreshStage::Finished(Outcome::Unavailable { reason }) => {
+                            RefreshState::Unavailable(reason.clone())
+                        }
+                        RefreshStage::Finished(Outcome::Failed(message)) => {
+                            RefreshState::Failed(message.clone())
+                        }
+                    };
+                    emit(
+                        on_event,
+                        Event::Refresh {
+                            source: source.clone(),
+                            state,
+                        },
+                    );
+                    let mut settles = settles.borrow_mut();
+                    match stage {
+                        RefreshStage::Started => {
+                            for s in settles.iter_mut().filter(|s| s.source == *source) {
+                                s.started = true;
+                            }
+                        }
+                        RefreshStage::Finished(_) => {
+                            let before = settles.len();
+                            settles.retain(|s| !(s.started && s.source == *source));
+                            for _ in settles.len()..before {
+                                emit(on_event, Event::OperationSettled);
+                            }
+                        }
+                    }
+                },
+                &more,
+            );
+        }));
+        match catch_unwind(AssertUnwindSafe(|| catalog.chips())) {
+            Ok(Ok(chips)) => emit(on_event, Event::Chips(chips)),
+            Ok(Err(e)) => emit(on_event, Event::Error(e.to_string())),
+            Err(_) => emit(
+                on_event,
+                Event::Error("internal error: chips panicked".into()),
+            ),
+        }
+        // Always sent, so the UI never stays in a refreshing state.
+        emit(on_event, Event::RefreshDone);
+        // Reloads that did not happen (an unknown source, a panic): never leave one waiting.
+        for _ in settles.borrow_mut().drain(..) {
+            emit(on_event, Event::OperationSettled);
+        }
+    }
+}
+
+struct Operations {
+    catalog: Catalog,
+    installer: Arc<dyn Installer>,
+    installable: Vec<SourceId>,
+    refresh: Sender<RefreshJob>,
+}
+
+impl Operations {
+    fn run(&self, jobs: Receiver<OpJob>, shared: &Shared, on_event: &Callback) {
+        while let Ok(job) = jobs.recv() {
+            let token = CancelToken::default();
+            {
+                let mut running = shared.running();
+                // Checked under the lock `Drop` sets it with: a queued operation never starts
+                // once the engine is going away.
+                if shared.stopping() {
+                    return;
+                }
+                *running = Some(token.clone());
+            }
+            let mut ran_installer = false;
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                self.perform(&job, &token, &mut ran_installer, on_event)
+            }))
+            .unwrap_or_else(|_| Err("internal error: the operation failed unexpectedly".into()));
+            *shared.running() = None;
+            emit(on_event, Event::Operation(OpState::Finished(result)));
+            // The refresh thread settles it once the source is reloaded; if that thread is
+            // gone, settle now rather than leave the UI waiting.
+            if !ran_installer
+                || self
+                    .refresh
+                    .send(RefreshJob::AfterOperation(job.source))
+                    .is_err()
+            {
+                emit(on_event, Event::OperationSettled);
+            }
+        }
+    }
+
+    /// Resolves the package and runs the installer. Returns the summary or the error message;
+    /// `ran_installer` tells whether the system may have changed.
+    fn perform(
+        &self,
+        job: &OpJob,
+        token: &CancelToken,
+        ran_installer: &mut bool,
+        on_event: &Callback,
+    ) -> Result<String, String> {
+        if !self.installable.contains(&job.source) {
+            return Err(format!(
+                "{} packages cannot be installed or removed here",
+                printable(job.source.as_str())
+            ));
+        }
+        let app = self
+            .catalog
+            .app(&job.key)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("{} is not in the index", printable(&job.key)))?;
+        let variant = app.variant(&job.source).ok_or_else(|| {
+            format!(
+                "{} is not available from {}",
+                printable(&app.title),
+                printable(job.source.as_str())
+            )
+        })?;
+        // A refresh since the page was opened may have moved the key to another package: never
+        // act on a package the user did not see.
+        if variant.name != job.package {
+            return Err(
+                "the package changed since the page was opened; reopen the app page".to_string(),
+            );
+        }
+        // The name is untrusted text from the index: it only ever goes into the typed request,
+        // which the helper validates again.
+        let packages = vec![variant.name.clone()];
+        let (request, verb) = match job.kind {
+            OpKind::Install => (Request::Install { packages }, "Installing"),
+            OpKind::Remove => (Request::Remove { packages }, "Removing"),
+        };
+        emit(
+            on_event,
+            Event::Operation(OpState::Started(format!(
+                "{verb} {}",
+                printable(&variant.name)
+            ))),
+        );
+        let mut changes = None;
+        let mut error = None;
+        *ran_installer = true;
+        let outcome = self
+            .installer
+            .run(&request, token, &mut |event| match event {
+                store_protocol::Event::Progress {
+                    stage,
+                    package,
+                    percent,
+                } => {
+                    let mut message = stage_verb(stage).to_string();
+                    if let Some(package) = package {
+                        message.push(' ');
+                        message.push_str(&printable(&package));
+                    }
+                    emit(
+                        on_event,
+                        Event::Operation(OpState::Progress { message, percent }),
+                    );
+                }
+                store_protocol::Event::CancelIgnored => emit(
+                    on_event,
+                    Event::Operation(OpState::Progress {
+                        message: "Too late to cancel; finishing".into(),
+                        percent: None,
+                    }),
+                ),
+                store_protocol::Event::Done { changes: done } => changes = Some(done),
+                store_protocol::Event::Error { code, message } => {
+                    error.get_or_insert(error_message(code, &message));
+                }
+                store_protocol::Event::Started { .. } => {}
+            });
+        match (outcome, error) {
+            (Err(e), _) => Err(install_error_message(&e)),
+            (Ok(()), Some(message)) => Err(message),
+            (Ok(()), None) => Ok(summary(changes.as_deref())),
+        }
+    }
+}
+
+fn icon_loop(jobs: &Mutex<Receiver<String>>, shared: &Shared, on_event: &Callback) {
+    loop {
+        // The lock is held only while waiting for a job, never while decoding or emitting.
+        let job = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
+        let Ok(path) = job else { return };
+        if shared.stopping() {
+            return;
+        }
+        // `icons::load` never panics.
+        let image = icons::load(Path::new(&path)).map(Arc::new);
+        emit(on_event, Event::Icon { path, image });
+    }
+}
+
+fn stage_verb(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Refresh => "Refreshing",
+        Stage::Resolve => "Resolving",
+        Stage::Download => "Downloading",
+        Stage::Verify => "Verifying",
+        Stage::Hooks => "Running hooks",
+        Stage::Install => "Installing",
+        Stage::Upgrade => "Upgrading",
+        Stage::Remove => "Removing",
+    }
+}
+
+fn error_message(code: ErrorCode, message: &str) -> String {
+    match code {
+        ErrorCode::Cancelled => "cancelled".to_string(),
+        _ => printable(message),
+    }
+}
+
+fn install_error_message(error: &InstallError) -> String {
+    match error {
+        InstallError::Dismissed => "authentication cancelled".to_string(),
+        InstallError::Rejected { code, message } => error_message(*code, message),
+        other => printable(&other.to_string()),
+    }
+}
+
+fn summary(changes: Option<&[store_protocol::Change]>) -> String {
+    let Some(changes) = changes else {
+        return "Done".to_string();
+    };
+    if changes.is_empty() {
+        return "Nothing to do".to_string();
+    }
+    let parts: Vec<String> = changes
+        .iter()
+        .map(|c| {
+            let verb = match c.kind {
+                ChangeKind::Installed => "Installed",
+                ChangeKind::Removed => "Removed",
+                ChangeKind::Upgraded => "Upgraded",
+            };
+            match &c.version {
+                Some(version) => format!("{verb} {} {}", printable(&c.package), printable(version)),
+                None => format!("{verb} {}", printable(&c.package)),
+            }
+        })
+        .collect();
+    parts.join(", ")
+}
+
+/// Untrusted text (package names, helper messages) with control characters replaced, so it
+/// cannot break the line it is shown on.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use store_core::testing::{FakeBackend, pkg};
+    use store_protocol::Event as HelperEvent;
+
+    use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Signals that it started, then ignores its cancel token until released.
+    struct StubbornInstaller {
+        started: Mutex<Sender<()>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl Installer for StubbornInstaller {
+        fn run(
+            &self,
+            _request: &Request,
+            _cancel: &CancelToken,
+            _on_event: &mut dyn FnMut(HelperEvent),
+        ) -> Result<(), InstallError> {
+            let _ = self.started.lock().unwrap().send(());
+            // Released by the test, or by the test ending (the sender is dropped).
+            let _ = self.release.lock().unwrap().recv();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dropping_the_engine_stops_waiting_for_an_operation_that_ignores_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (started_tx, started) = channel();
+        let (release, release_rx) = channel();
+        let (events_tx, events) = channel();
+        let events_tx = Mutex::new(events_tx);
+        let config = EngineConfig {
+            db_path: dir.path().join("index.db"),
+            backends: vec![Box::new(FakeBackend::new(
+                "pacman",
+                vec![pkg("pacman", "tree", "x")],
+            ))],
+            installer: Arc::new(StubbornInstaller {
+                started: Mutex::new(started_tx),
+                release: Mutex::new(release_rx),
+            }),
+            installable: vec![SourceId::new("pacman")],
+            host: Host::none(),
+        };
+        let mut engine = Engine::start(config, move |event| {
+            let _ = events_tx.lock().unwrap().send(event);
+        })
+        .unwrap();
+        engine.operation_wait = Duration::from_millis(200);
+        engine.send(Command::Refresh);
+        while events.recv_timeout(TIMEOUT).unwrap() != Event::RefreshDone {}
+        engine.send(Command::Install {
+            key: "tree".into(),
+            source: SourceId::new("pacman"),
+            package: "tree".into(),
+        });
+        started.recv_timeout(TIMEOUT).unwrap();
+
+        let (dropped_tx, dropped) = channel();
+        let begin = Instant::now();
+        std::thread::spawn(move || {
+            drop(engine);
+            let _ = dropped_tx.send(());
+        });
+        dropped
+            .recv_timeout(TIMEOUT)
+            .expect("dropping the engine did not return within 5 s");
+        assert!(
+            begin.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            begin.elapsed()
+        );
+        // The detached operations thread finishes once the installer returns.
+        let _ = release.send(());
+    }
+}
