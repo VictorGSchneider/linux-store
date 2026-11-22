@@ -44,8 +44,6 @@ environment variable that exposes them.
   NEVER construct the real installer. Only `gui/src/main.rs` builds it.
 - A real-engine run (`live_snapshot`) must use a temporary `XDG_CACHE_HOME`; the first refresh
   downloads the AUR dump. Its snapshots show this machine's installed packages: do not commit them.
-- `slint-viewer` and `slint-lsp` are not installed here, so `slint-viewer --check` and `slint-lsp
-  format` are unavailable; the headless examples and `cargo check -p linux-store` are the check.
 - Arch's AppStream icons are JPEG XL (`.jxl`), decoded with `jxl-oxide` in `app/src/icons.rs`
   (PNG too); an icon that fails to decode falls back to a letter tile.
 - Size contracts are in the headers of `gui/ui/row.slint`, `home-page.slint` and `list-page.slint`
@@ -58,6 +56,7 @@ environment variable that exposes them.
 Before you work on the UI, install the Slint plugin from [slint-ui/ai-plugins](https://github.com/slint-ui/ai-plugins).
 It teaches you the `.slint` language and its pitfalls.
 It also lets you search the documentation, and lets you render and drive the running UI.
+(Some agent sessions already have it; check before suggesting the install.)
 If it isn't installed, suggest that the user install it:
 
 ```sh
@@ -111,6 +110,9 @@ Use one of these on that machine until the NVIDIA/EGL problem is understood.
 
 ## Live Preview
 
+Live preview, `cargo run` and the plugin's running-UI tools are for the owner's machine with the
+safe renderer settings above; agents use the headless examples instead.
+
 While you work on the UI, build and run the application with live preview.
 It compiles much faster, because the `.slint` files aren't compiled to native code.
 
@@ -127,8 +129,11 @@ Use live preview only during development, and keep it out of the build files.
 
 ## Working on the UI
 
-- Check `.slint` changes with `cargo check -p linux-store` (the build compiles them).
+- Check `.slint` changes without a full build with `slint-viewer --check .`.
 - Look at a render before you call UI work done:
   use the plugin's preview, or a screenshot of the live-preview application.
 - When the UI changes visibly, update the screenshots in `README.md`.
-- Keep `.slint` formatting consistent by hand (`slint-lsp` is not installed here).
+- Format changed `.slint` files with `slint-lsp format -i <file>`.
+- If `slint-viewer`/`slint-lsp` are not installed (as in the agent sandbox so far),
+  `cargo check -p linux-store --all-targets` is the compile check and the headless examples are
+  the way to look at the UI.
