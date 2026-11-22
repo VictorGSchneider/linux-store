@@ -135,10 +135,11 @@ impl Harness {
         }
     }
 
-    fn install(&self, key: &str, from: &str) {
+    fn install(&self, key: &str, from: &str, package: &str) {
         self.engine.send(Command::Install {
             key: key.into(),
             source: source(from),
+            package: package.into(),
         });
     }
 }
@@ -377,20 +378,24 @@ fn install_unsupported_source_never_calls_the_installer() {
     let fake = Arc::new(FakeInstaller::new(vec![], Ok(())));
     let h = start(firefox_backends(), fake.clone());
     h.refreshed();
-    h.install(FIREFOX, "flatpak");
+    h.install(FIREFOX, "flatpak", FIREFOX);
     assert!(matches!(
         h.next(),
         Event::Operation(OpState::Finished(Err(_)))
     ));
+    // Nothing ran, so the operation is settled at once, without a refresh.
+    assert_eq!(h.next(), Event::OperationSettled);
     // A source that is installable but has no variant of the app, and an unknown key.
     h.engine.send(Command::Remove {
         key: "no-such-app".into(),
         source: source("pacman"),
+        package: "no-such-app".into(),
     });
     assert!(matches!(
         h.next(),
         Event::Operation(OpState::Finished(Err(_)))
     ));
+    assert_eq!(h.next(), Event::OperationSettled);
     assert!(fake.requests().is_empty());
     // Nothing ran, so nothing is refreshed: had the first operation asked for a refresh of
     // flatpak, it would be queued before this full refresh and end first.
@@ -423,7 +428,7 @@ fn install_sends_the_variant_name_to_the_installer() {
     ));
     let h = start(firefox_backends(), fake.clone());
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert!(matches!(h.next(), Event::Operation(OpState::Started(_))));
     match h.next() {
         Event::Operation(OpState::Progress { message, percent }) => {
@@ -455,6 +460,274 @@ fn install_sends_the_variant_name_to_the_installer() {
         })
         .collect();
     assert_eq!(refreshed, ["pacman", "pacman"]);
+    // The settle follows the post-operation refresh of that source.
+    let n = events.len();
+    let pos = events
+        .iter()
+        .position(|e| *e == Event::OperationSettled)
+        .expect("settled");
+    let updated = events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::Refresh { source, state: RefreshState::Updated(_) }
+                if source.as_str() == "pacman")
+        })
+        .unwrap();
+    assert!(pos > updated && pos < n, "{events:?}");
+}
+
+// --- settling after an operation ---
+
+/// The packages a source reports, changed by `MarkingInstaller` like a real install changes the
+/// system. `packages()` reads them when it starts; a held call waits for `release` after that.
+#[derive(Clone)]
+struct System {
+    packages: Arc<Mutex<Vec<Package>>>,
+}
+
+impl System {
+    fn new(packages: Vec<Package>) -> System {
+        System {
+            packages: Arc::new(Mutex::new(packages)),
+        }
+    }
+}
+
+struct SystemBackend {
+    name: &'static str,
+    system: System,
+    /// `packages()` calls to hold, each until a message arrives (or 5 s pass).
+    hold: Arc<Mutex<usize>>,
+    release: Mutex<Option<Receiver<()>>>,
+    started: Mutex<Option<Sender<()>>>,
+}
+
+impl SystemBackend {
+    fn new(name: &'static str, system: &System) -> SystemBackend {
+        SystemBackend {
+            name,
+            system: system.clone(),
+            hold: Arc::new(Mutex::new(0)),
+            release: Mutex::new(None),
+            started: Mutex::new(None),
+        }
+    }
+
+    /// Holds the next `n` calls; returns the backend, a receiver signalled at each call, the
+    /// release sender and the hold counter (to hold more calls later).
+    #[allow(clippy::type_complexity)]
+    fn holding(self, n: usize) -> (SystemBackend, Receiver<()>, Sender<()>, Arc<Mutex<usize>>) {
+        let (started_tx, started) = channel();
+        let (release, release_rx) = channel();
+        *self.hold.lock().unwrap() = n;
+        *self.release.lock().unwrap() = Some(release_rx);
+        *self.started.lock().unwrap() = Some(started_tx);
+        let hold = self.hold.clone();
+        (self, started, release, hold)
+    }
+}
+
+impl Backend for SystemBackend {
+    fn source(&self) -> SourceId {
+        source(self.name)
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+    fn packages(&self) -> store_core::Result<Vec<Package>> {
+        let snapshot = self.system.packages.lock().unwrap().clone();
+        let held = {
+            let mut hold = self.hold.lock().unwrap();
+            let held = *hold > 0;
+            *hold = hold.saturating_sub(1);
+            held
+        };
+        if let Some(started) = self.started.lock().unwrap().as_ref() {
+            let _ = started.send(());
+        }
+        if held && let Some(release) = self.release.lock().unwrap().as_ref() {
+            let _ = release.recv_timeout(TIMEOUT);
+        }
+        Ok(snapshot)
+    }
+}
+
+/// Marks the requested package installed in `system`, then succeeds.
+struct MarkingInstaller {
+    system: System,
+}
+
+impl Installer for MarkingInstaller {
+    fn run(
+        &self,
+        request: &Request,
+        _cancel: &CancelToken,
+        _on_event: &mut dyn FnMut(HelperEvent),
+    ) -> Result<(), InstallError> {
+        if let Request::Install { packages } = request {
+            for p in self.system.packages.lock().unwrap().iter_mut() {
+                if packages.contains(&p.name) {
+                    p.installed_version = Some(p.version.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Harness {
+    fn open_installed(&self, key: &str, from: &str) -> bool {
+        self.engine.send(Command::Open { key: key.into() });
+        match self.wait_for(|e| matches!(e, Event::AppPage(_))) {
+            Event::AppPage(Some(view)) => view.app.variant(&source(from)).unwrap().is_installed(),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_operation_is_settled_once_its_source_shows_the_change() {
+    let system = System::new(vec![pkg("pacman", "tree", "Lists directories")]);
+    let h = start(
+        vec![Box::new(SystemBackend::new("pacman", &system))],
+        Arc::new(MarkingInstaller {
+            system: system.clone(),
+        }),
+    );
+    h.refreshed();
+    assert!(!h.open_installed("tree", "pacman"));
+    h.install("tree", "pacman", "tree");
+    assert!(h.finished().is_ok());
+    let seen = {
+        let mut seen = Vec::new();
+        loop {
+            let e = h.next();
+            let done = e == Event::OperationSettled;
+            seen.push(e);
+            if done {
+                break seen;
+            }
+        }
+    };
+    assert!(
+        seen.contains(&Event::Refresh {
+            source: source("pacman"),
+            state: RefreshState::Updated(1)
+        }),
+        "{seen:?}"
+    );
+    // Anything opened after the settle shows the new state.
+    assert!(h.open_installed("tree", "pacman"));
+}
+
+#[test]
+fn the_post_operation_refresh_does_not_wait_for_a_slow_full_refresh() {
+    let system = System::new(vec![pkg("pacman", "tree", "Lists directories")]);
+    let (slow, slow_started, release_slow, _) =
+        SystemBackend::new("aur", &System::new(vec![pkg("aur", "yay", "x")])).holding(1);
+    let h = start(
+        vec![
+            Box::new(SystemBackend::new("pacman", &system)),
+            Box::new(slow),
+        ],
+        Arc::new(MarkingInstaller {
+            system: system.clone(),
+        }),
+    );
+    h.engine.send(Command::Refresh);
+    slow_started.recv_timeout(TIMEOUT).unwrap();
+    // The fast source of the full pass is written; the slow one is still downloading.
+    h.wait_for(|e| {
+        matches!(e, Event::Refresh { source, state: RefreshState::Updated(_) }
+            if source.as_str() == "pacman")
+    });
+    h.install("tree", "pacman", "tree");
+    assert!(h.finished().is_ok());
+    h.wait_for(|e| *e == Event::OperationSettled);
+    assert!(h.open_installed("tree", "pacman"));
+    // The full pass is still running: it ends only now.
+    release_slow.send(()).unwrap();
+    let rest = h.until_refresh_done();
+    assert!(
+        rest.contains(&Event::Refresh {
+            source: source("aur"),
+            state: RefreshState::Updated(1)
+        }),
+        "{rest:?}"
+    );
+}
+
+#[test]
+fn a_collection_that_started_before_the_operation_does_not_settle_it() {
+    let system = System::new(vec![pkg("pacman", "tree", "Lists directories")]);
+    let (pacman, started, release, hold) = SystemBackend::new("pacman", &system).holding(0);
+    let h = start(
+        vec![Box::new(pacman)],
+        Arc::new(MarkingInstaller {
+            system: system.clone(),
+        }),
+    );
+    h.refreshed();
+    started.recv_timeout(TIMEOUT).unwrap();
+    // A full refresh whose collection reads the system, then is held while the install runs.
+    *hold.lock().unwrap() = 1;
+    h.engine.send(Command::Refresh);
+    started.recv_timeout(TIMEOUT).unwrap();
+    h.install("tree", "pacman", "tree");
+    assert!(h.finished().is_ok());
+    // The held collection read the old state: it must not settle the operation.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match h.events.recv_timeout(left) {
+            Ok(e) => assert_ne!(e, Event::OperationSettled, "settled by a stale collection"),
+            Err(_) => break,
+        }
+    }
+    release.send(()).unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let e = h.next();
+        let done = e == Event::OperationSettled;
+        seen.push(e);
+        if done {
+            break;
+        }
+    }
+    let pacman: Vec<&RefreshState> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::Refresh { source, state } if source.as_str() == "pacman" => Some(state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pacman,
+        [
+            &RefreshState::Updated(1),
+            &RefreshState::Started,
+            &RefreshState::Updated(1)
+        ],
+        "{seen:?}"
+    );
+    assert!(h.open_installed("tree", "pacman"));
+}
+
+#[test]
+fn a_package_that_changed_since_the_page_was_opened_is_refused() {
+    let fake = Arc::new(FakeInstaller::new(vec![], Ok(())));
+    let h = start(firefox_backends(), fake.clone());
+    h.refreshed();
+    // The page showed another package name for this source than the index now holds.
+    h.install(FIREFOX, "pacman", "firefox-esr");
+    assert_eq!(
+        h.finished(),
+        Err("the package changed since the page was opened; reopen the app page".to_string())
+    );
+    assert_eq!(h.next(), Event::OperationSettled);
+    assert!(fake.requests().is_empty());
 }
 
 #[test]
@@ -465,6 +738,7 @@ fn remove_sends_a_remove_request() {
     h.engine.send(Command::Remove {
         key: "tree".into(),
         source: source("pacman"),
+        package: "tree".into(),
     });
     assert!(h.finished().is_ok());
     assert_eq!(
@@ -482,7 +756,7 @@ fn dismissed_authentication_finishes_idle_with_message() {
         Arc::new(FakeInstaller::new(vec![], Err(InstallError::Dismissed))),
     );
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert_eq!(h.finished(), Err("authentication cancelled".to_string()));
     let events = h.until_refresh_done();
     assert!(
@@ -506,7 +780,7 @@ fn rejected_request_finishes_with_the_helper_message() {
         )),
     );
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert_eq!(
         h.finished(),
         Err("refusing to touch a protected package".to_string())
@@ -526,7 +800,7 @@ fn an_error_event_finishes_with_its_message() {
         )),
     );
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert_eq!(h.finished(), Err("disk full".to_string()));
 }
 
@@ -581,7 +855,7 @@ fn cancel_during_an_operation_sets_the_token() {
     h.refreshed();
     // A cancel with nothing running is ignored and does not affect the next operation.
     h.engine.send(Command::CancelOperation);
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     started.recv_timeout(TIMEOUT).unwrap();
     h.engine.send(Command::CancelOperation);
     assert_eq!(h.finished(), Err("cancelled".to_string()));
@@ -611,9 +885,9 @@ fn dropping_the_engine_joins_its_threads() {
     let (installer, started) = BlockingInstaller::new();
     let h = start(firefox_backends(), installer.clone());
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     // A second operation waits in the queue; shutting down must not start it.
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     started.recv_timeout(TIMEOUT).unwrap();
     let Harness { engine, events, .. } = h;
     drop_within_timeout(engine);
@@ -665,10 +939,10 @@ impl Installer for PanickingInstaller {
 fn an_installer_panic_still_finishes_the_operation() {
     let h = start(firefox_backends(), Arc::new(PanickingInstaller));
     h.refreshed();
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert!(h.finished().is_err());
     // The operations thread survived and takes the next operation.
-    h.install(FIREFOX, "pacman");
+    h.install(FIREFOX, "pacman", "firefox");
     assert!(h.finished().is_err());
 }
 

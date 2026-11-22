@@ -6,11 +6,14 @@
 //!   `Updates`, coalescing searches that queued up behind one another;
 //! - refresh: the `Store` (the only writer) and a `Catalog` for the chip counts afterwards;
 //! - operations: one install or remove at a time, in order; it asks the refresh thread to reload
-//!   the affected source when an operation ends;
+//!   the affected source when an operation ends. That reload does not wait for a running full
+//!   refresh: the refresh thread takes it in the middle of the pass (see
+//!   `Store::refresh_with_more`) and sends `OperationSettled` once the source is written;
 //! - two icon threads decoding icon files.
 //!
 //! `CancelOperation` is handled in `send` itself, so it reaches the running operation instead of
 //! waiting behind it. Dropping the `Engine` stops and joins every thread.
+use std::cell::{Cell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,13 +63,17 @@ pub enum Command {
     Updates,
     /// Reloads every source.
     Refresh,
+    /// `package` is the name of the variant the page showed for `source`; the operation is
+    /// refused when the index now holds another one (the page is stale).
     Install {
         key: String,
         source: SourceId,
+        package: String,
     },
     Remove {
         key: String,
         source: SourceId,
+        package: String,
     },
     /// Cancels the running operation, if any. Queued operations are not affected.
     CancelOperation,
@@ -121,6 +128,11 @@ pub enum Event {
     /// Ends every refresh, including the one that follows an operation.
     RefreshDone,
     Operation(OpState),
+    /// Sent exactly once for every `Install` and `Remove`, after its `Finished`: the index now
+    /// holds the affected source as it is after the operation (or the reload failed), so a
+    /// page asked for from now on shows the result. Sent right after `Finished` when the
+    /// installer never ran. Operations are settled in the order they finished.
+    OperationSettled,
     Icon {
         path: String,
         image: Option<Arc<Rgba>>,
@@ -151,7 +163,8 @@ fn emit(on_event: &Callback, event: Event) {
 
 enum RefreshJob {
     All,
-    Only(Vec<SourceId>),
+    /// Reloads one source after an operation; `OperationSettled` follows once it is written.
+    AfterOperation(SourceId),
 }
 
 enum OpKind {
@@ -163,6 +176,7 @@ struct OpJob {
     kind: OpKind,
     key: String,
     source: SourceId,
+    package: String,
 }
 
 struct Channels {
@@ -328,13 +342,31 @@ impl Engine {
             Command::Refresh => {
                 let _ = channels.refresh.send(RefreshJob::All);
             }
-            Command::Install { key, source } => {
+            Command::Install {
+                key,
+                source,
+                package,
+            } => {
                 let kind = OpKind::Install;
-                let _ = channels.operations.send(OpJob { kind, key, source });
+                let _ = channels.operations.send(OpJob {
+                    kind,
+                    key,
+                    source,
+                    package,
+                });
             }
-            Command::Remove { key, source } => {
+            Command::Remove {
+                key,
+                source,
+                package,
+            } => {
                 let kind = OpKind::Remove;
-                let _ = channels.operations.send(OpJob { kind, key, source });
+                let _ = channels.operations.send(OpJob {
+                    kind,
+                    key,
+                    source,
+                    package,
+                });
             }
             Command::CancelOperation => {
                 if let Some(token) = self.shared.running().as_ref() {
@@ -442,6 +474,13 @@ impl Queries {
     }
 }
 
+/// An operation waiting for its source to be reloaded. `started` turns true when a collection
+/// of that source starts after the request: only such a collection reflects the operation.
+struct Settle {
+    source: SourceId,
+    started: bool,
+}
+
 fn refresh_loop(
     mut store: Store,
     catalog: Catalog,
@@ -449,36 +488,83 @@ fn refresh_loop(
     shared: &Shared,
     on_event: &Callback,
 ) {
-    while let Ok(job) = jobs.recv() {
+    // A full refresh asked for during a pass runs after it (once, however often it was asked).
+    let full_later = Cell::new(false);
+    let settles: RefCell<Vec<Settle>> = RefCell::new(Vec::new());
+    // Takes the reloads that operations asked for; remembers full refreshes for later.
+    let take = |job: RefreshJob| -> Option<SourceId> {
+        match job {
+            RefreshJob::All => {
+                full_later.set(true);
+                None
+            }
+            RefreshJob::AfterOperation(source) => {
+                settles.borrow_mut().push(Settle {
+                    source: source.clone(),
+                    started: false,
+                });
+                Some(source)
+            }
+        }
+    };
+    loop {
+        let only = if full_later.replace(false) {
+            None
+        } else {
+            let Ok(job) = jobs.recv() else { return };
+            match take(job) {
+                None => {
+                    full_later.set(false);
+                    None
+                }
+                Some(source) => Some(vec![source]),
+            }
+        };
         if shared.stopping() {
             return;
         }
-        let only = match &job {
-            RefreshJob::All => None,
-            RefreshJob::Only(sources) => Some(sources.as_slice()),
-        };
+        let more = || jobs.try_iter().filter_map(&take).collect::<Vec<_>>();
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            store.refresh_with(only, &|source, stage| {
-                let state = match stage {
-                    RefreshStage::Started => RefreshState::Started,
-                    RefreshStage::Finished(Outcome::Updated { packages }) => {
-                        RefreshState::Updated(*packages)
+            store.refresh_with_more(
+                only.as_deref(),
+                &|source, stage| {
+                    let state = match stage {
+                        RefreshStage::Started => RefreshState::Started,
+                        RefreshStage::Finished(Outcome::Updated { packages }) => {
+                            RefreshState::Updated(*packages)
+                        }
+                        RefreshStage::Finished(Outcome::Unavailable { reason }) => {
+                            RefreshState::Unavailable(reason.clone())
+                        }
+                        RefreshStage::Finished(Outcome::Failed(message)) => {
+                            RefreshState::Failed(message.clone())
+                        }
+                    };
+                    emit(
+                        on_event,
+                        Event::Refresh {
+                            source: source.clone(),
+                            state,
+                        },
+                    );
+                    let mut settles = settles.borrow_mut();
+                    match stage {
+                        RefreshStage::Started => {
+                            for s in settles.iter_mut().filter(|s| s.source == *source) {
+                                s.started = true;
+                            }
+                        }
+                        RefreshStage::Finished(_) => {
+                            let before = settles.len();
+                            settles.retain(|s| !(s.started && s.source == *source));
+                            for _ in settles.len()..before {
+                                emit(on_event, Event::OperationSettled);
+                            }
+                        }
                     }
-                    RefreshStage::Finished(Outcome::Unavailable { reason }) => {
-                        RefreshState::Unavailable(reason.clone())
-                    }
-                    RefreshStage::Finished(Outcome::Failed(message)) => {
-                        RefreshState::Failed(message.clone())
-                    }
-                };
-                emit(
-                    on_event,
-                    Event::Refresh {
-                        source: source.clone(),
-                        state,
-                    },
-                );
-            });
+                },
+                &more,
+            );
         }));
         match catch_unwind(AssertUnwindSafe(|| catalog.chips())) {
             Ok(Ok(chips)) => emit(on_event, Event::Chips(chips)),
@@ -490,6 +576,10 @@ fn refresh_loop(
         }
         // Always sent, so the UI never stays in a refreshing state.
         emit(on_event, Event::RefreshDone);
+        // Reloads that did not happen (an unknown source, a panic): never leave one waiting.
+        for _ in settles.borrow_mut().drain(..) {
+            emit(on_event, Event::OperationSettled);
+        }
     }
 }
 
@@ -520,8 +610,15 @@ impl Operations {
             .unwrap_or_else(|_| Err("internal error: the operation failed unexpectedly".into()));
             *shared.running() = None;
             emit(on_event, Event::Operation(OpState::Finished(result)));
-            if ran_installer {
-                let _ = self.refresh.send(RefreshJob::Only(vec![job.source]));
+            // The refresh thread settles it once the source is reloaded; if that thread is
+            // gone, settle now rather than leave the UI waiting.
+            if !ran_installer
+                || self
+                    .refresh
+                    .send(RefreshJob::AfterOperation(job.source))
+                    .is_err()
+            {
+                emit(on_event, Event::OperationSettled);
             }
         }
     }
@@ -553,6 +650,13 @@ impl Operations {
                 printable(job.source.as_str())
             )
         })?;
+        // A refresh since the page was opened may have moved the key to another package: never
+        // act on a package the user did not see.
+        if variant.name != job.package {
+            return Err(
+                "the package changed since the page was opened; reopen the app page".to_string(),
+            );
+        }
         // The name is untrusted text from the index: it only ever goes into the typed request,
         // which the helper validates again.
         let packages = vec![variant.name.clone()];
@@ -744,6 +848,7 @@ mod tests {
         engine.send(Command::Install {
             key: "tree".into(),
             source: SourceId::new("pacman"),
+            package: "tree".into(),
         });
         started.recv_timeout(TIMEOUT).unwrap();
 

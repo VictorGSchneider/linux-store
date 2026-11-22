@@ -1,6 +1,7 @@
 //! Pure bookkeeping for the app page and its operations, kept apart from the window so the
 //! rules can be tested: which `AppPage` answer is current, whether a click may start an
 //! operation, and which app an operation's result belongs to.
+use std::time::{Duration, Instant};
 
 /// Which app the user asked for and which one the page shows.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -47,39 +48,115 @@ impl PageKeys {
     }
 }
 
-/// Whether an install or remove is in flight, and for which app. Owned only by the click and by
-/// `Started`/`Finished`; an unrelated error never touches it.
+/// The longest the buttons wait, after an operation finished, for the page to show its result.
+/// Past it they come back even if the reload never arrived (the status text still tells what
+/// happened).
+pub const SETTLE_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Clicks are accepted.
+    #[default]
+    Idle,
+    /// A click was sent, or an operation runs.
+    Pending,
+    /// The operation finished; the engine has not reloaded its source yet.
+    Settling { since: Instant },
+    /// The source is reloaded; the page was asked for again (the `seq`-th `Open`) and its
+    /// answer has not arrived yet.
+    Reloading { since: Instant, seq: u64 },
+}
+
+/// Whether an install or remove may be clicked, and which app the last one was for. Owned only
+/// by the click, `Started`, `Finished`, `OperationSettled`, the page answers and the timeout;
+/// an unrelated error never touches it.
+///
+/// After `Finished` the buttons stay closed (settling) until the page shows the source as it is
+/// after the operation: the engine's `OperationSettled`, then the answer to the `Open` sent after
+/// it. Otherwise a second click on a page that still says "Install" would start another
+/// privileged operation. [`SETTLE_TIMEOUT`] bounds the wait.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OpGate {
-    pending: bool,
+    phase: Phase,
     key: Option<String>,
+    /// Operations finished whose `OperationSettled` has not arrived. The engine settles them in
+    /// order, so a late settle of an operation that timed out is not taken for the next one's.
+    unsettled: u32,
 }
 
 impl OpGate {
     /// A click on a source button of the app `page_key`. Returns the key to operate on when the
-    /// click is accepted (nothing in flight, a page open).
+    /// click is accepted (nothing in flight or settling, a page open).
     pub fn click(&mut self, page_key: Option<&str>, ui_active: bool) -> Option<String> {
-        if self.pending || ui_active {
+        if self.phase != Phase::Idle || ui_active {
             return None;
         }
         let key = page_key?.to_string();
-        self.pending = true;
+        self.phase = Phase::Pending;
         self.key = Some(key.clone());
         Some(key)
     }
 
+    /// Whether clicks are refused (in flight or settling).
     pub fn busy(&self) -> bool {
-        self.pending
+        self.phase != Phase::Idle
     }
 
+    /// Whether the buttons show the "updating" look: the operation ended but the page does not
+    /// show its result yet.
+    pub fn settling(&self) -> bool {
+        matches!(self.phase, Phase::Settling { .. } | Phase::Reloading { .. })
+    }
+
+    /// An operation started (also one queued earlier): it owns the buttons now.
     pub fn started(&mut self) {
-        self.pending = true;
+        self.phase = Phase::Pending;
     }
 
     /// The operation ended (also a refusal that never started). Returns the app it was for.
-    pub fn finished(&mut self) -> Option<String> {
-        self.pending = false;
+    pub fn finished(&mut self, now: Instant) -> Option<String> {
+        self.unsettled += 1;
+        self.phase = Phase::Settling { since: now };
         self.key.clone()
+    }
+
+    /// The engine reloaded the source of the oldest unsettled operation. `reopen` is the
+    /// sequence number of the `Open` the caller sends for the page on show, or `None` when no
+    /// app page is open (then nothing on screen can be stale).
+    pub fn settled(&mut self, reopen: Option<u64>) {
+        self.unsettled = self.unsettled.saturating_sub(1);
+        if self.unsettled > 0 {
+            return;
+        }
+        if let Phase::Settling { since } = self.phase {
+            self.phase = match reopen {
+                Some(seq) => Phase::Reloading { since, seq },
+                None => Phase::Idle,
+            };
+        }
+    }
+
+    /// The answer to the `answered`-th `Open` arrived (shown or not).
+    pub fn page_answered(&mut self, answered: u64) {
+        if let Phase::Reloading { seq, .. } = self.phase
+            && answered >= seq
+        {
+            self.phase = Phase::Idle;
+        }
+    }
+
+    /// Reopens the buttons when the settle took longer than [`SETTLE_TIMEOUT`]. Returns whether
+    /// it did.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        match self.phase {
+            Phase::Settling { since } | Phase::Reloading { since, .. }
+                if now.saturating_duration_since(since) >= SETTLE_TIMEOUT =>
+            {
+                self.phase = Phase::Idle;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -160,15 +237,92 @@ mod tests {
     }
 
     #[test]
-    fn a_second_click_is_ignored_until_finished() {
+    fn a_second_click_is_ignored_until_settled() {
+        let now = Instant::now();
         let mut g = OpGate::default();
         assert_eq!(g.click(Some("a"), false), Some("a".to_string()));
         assert_eq!(g.click(Some("a"), false), None);
         g.started();
         assert_eq!(g.click(Some("a"), false), None);
         assert!(g.busy());
-        assert_eq!(g.finished(), Some("a".to_string()));
+        assert!(!g.settling());
+        assert_eq!(g.finished(now), Some("a".to_string()));
+        // Finished: settling, a click is still ignored.
+        assert!(g.settling() && g.busy());
+        assert_eq!(g.click(Some("a"), false), None);
+        // Reloaded, no page open: nothing on screen is stale.
+        g.settled(None);
+        assert!(!g.busy() && !g.settling());
         assert_eq!(g.click(Some("b"), false), Some("b".to_string()));
+    }
+
+    #[test]
+    fn settling_waits_for_the_page_asked_after_the_reload() {
+        let now = Instant::now();
+        let mut g = OpGate::default();
+        g.click(Some("a"), false);
+        g.started();
+        g.finished(now);
+        // An answer to an earlier Open does not count: it may predate the reload.
+        g.page_answered(3);
+        assert!(g.settling());
+        g.settled(Some(5));
+        assert!(g.settling());
+        g.page_answered(4);
+        assert!(g.settling(), "an answer to an Open sent before the reload");
+        assert_eq!(g.click(Some("a"), false), None);
+        g.page_answered(5);
+        assert!(!g.busy());
+        assert_eq!(g.click(Some("a"), false), Some("a".to_string()));
+    }
+
+    #[test]
+    fn settling_ends_after_the_timeout_at_the_latest() {
+        let t0 = Instant::now();
+        let mut g = OpGate::default();
+        assert!(!g.tick(t0 + SETTLE_TIMEOUT), "idle: nothing to end");
+        g.click(Some("a"), false);
+        g.finished(t0);
+        assert!(!g.tick(t0 + SETTLE_TIMEOUT - Duration::from_millis(1)));
+        assert!(g.settling());
+        assert!(g.tick(t0 + SETTLE_TIMEOUT));
+        assert!(!g.busy());
+        // Also while waiting for the page.
+        g.click(Some("a"), false);
+        g.finished(t0);
+        g.settled(Some(1));
+        assert!(g.tick(t0 + SETTLE_TIMEOUT));
+        assert!(!g.busy());
+    }
+
+    #[test]
+    fn a_late_settle_of_a_timed_out_operation_is_not_taken_for_the_next_one() {
+        let t0 = Instant::now();
+        let mut g = OpGate::default();
+        g.click(Some("a"), false);
+        g.finished(t0);
+        assert!(g.tick(t0 + SETTLE_TIMEOUT));
+        // A new operation starts and resets the settling state.
+        g.click(Some("b"), false);
+        g.started();
+        assert!(!g.settling() && g.busy());
+        g.finished(t0 + SETTLE_TIMEOUT);
+        // The first operation's settle arrives late: the second is still settling.
+        g.settled(Some(1));
+        assert!(g.settling());
+        g.settled(None);
+        assert!(!g.busy());
+    }
+
+    #[test]
+    fn a_started_operation_resets_settling() {
+        let mut g = OpGate::default();
+        g.click(Some("a"), false);
+        g.finished(Instant::now());
+        assert!(g.settling());
+        // An operation queued earlier starts now.
+        g.started();
+        assert!(!g.settling() && g.busy());
     }
 
     #[test]

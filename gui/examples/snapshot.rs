@@ -51,15 +51,17 @@ fn fill(ui: &AppWindow) {
         ("Audacity", "Audio editor", None, true),
     ];
     let chips: Vec<ChipData> = [
-        ("pacman", 14210, true),
-        ("flatpak", 2310, false),
-        ("aur", 90123, false),
+        ("pacman", 14210, true, false),
+        ("flatpak", 1, false, false),
+        ("aur", 90123, false, true),
     ]
     .into_iter()
-    .map(|(source, count, selected)| ChipData {
+    .map(|(source, count, selected, updating)| ChipData {
         source: source.into(),
         count,
+        count_text: linux_store::convert::group_thousands(count as usize).into(),
         selected,
+        updating,
     })
     .collect();
     ui.set_chips(slint::ModelRc::new(slint::VecModel::from(chips)));

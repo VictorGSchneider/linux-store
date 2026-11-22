@@ -5,21 +5,51 @@
 //! XDG_CACHE_HOME=/some/tmp SLINT_BACKEND=headless cargo run -p linux-store \
 //!     --example fake_ops --features slint/mcp -- OUT_DIR
 //!
-//! Writes OUT_DIR/fake-{page,op,cancelled,error,narrow,installed}.png.
+//! Writes OUT_DIR/fake-{page,op,cancelled,error,narrow,installed,settling,settled}.png.
+//! After a successful install it asserts that the page buttons stay closed ("Updating…") until
+//! the page shows the installed package, and that a click meanwhile starts nothing.
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use linux_store::{AppWindow, Page, wiring};
 use slint::{ComponentHandle, Model};
 use store_core::testing::{FakeBackend, pkg};
-use store_core::{CancelToken, Host, InstallError, Installer, SourceId};
+use store_core::{Backend, CancelToken, Host, InstallError, Installer, Package, SourceId};
 use store_protocol::{ErrorCode, Event, Request, Stage};
+
+/// The pacman packages as the "system" has them; the installer changes them.
+type System = Arc<Mutex<Vec<Package>>>;
+
+/// A pacman backend that reads `System`, taking `delay_ms` per call (a slow reload).
+struct Live {
+    system: System,
+    delay_ms: Arc<AtomicU64>,
+}
+
+impl Backend for Live {
+    fn source(&self) -> SourceId {
+        SourceId::new("pacman")
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+    fn packages(&self) -> store_core::Result<Vec<Package>> {
+        let snapshot = self.system.lock().unwrap().clone();
+        std::thread::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst)));
+        Ok(snapshot)
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Mode {
+    /// Marks the package installed and succeeds.
+    Succeed,
     /// Reports 40% and then waits for the cancel token.
     Hold,
     Dismissed,
@@ -30,6 +60,7 @@ enum Mode {
 struct Scripted {
     mode: Arc<Mutex<Mode>>,
     runs: Arc<AtomicUsize>,
+    system: System,
 }
 
 impl Installer for Scripted {
@@ -42,6 +73,16 @@ impl Installer for Scripted {
         self.runs.fetch_add(1, Ordering::SeqCst);
         let mode = *self.mode.lock().unwrap();
         match mode {
+            Mode::Succeed => {
+                if let Request::Install { packages } = _request {
+                    for p in self.system.lock().unwrap().iter_mut() {
+                        if packages.contains(&p.name) {
+                            p.installed_version = Some(p.version.clone());
+                        }
+                    }
+                }
+                Ok(())
+            }
             Mode::Hold => {
                 on_event(Event::Progress {
                     stage: Stage::Download,
@@ -97,16 +138,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mode = Arc::new(Mutex::new(Mode::Hold));
     let runs = Arc::new(AtomicUsize::new(0));
+    let system: System = Arc::new(Mutex::new(vec![firefox, tool]));
+    let delay_ms = Arc::new(AtomicU64::new(0));
     let db = std::env::var("XDG_CACHE_HOME")?;
     let config = store_app::EngineConfig {
         db_path: std::path::PathBuf::from(db).join("fake-ops.db"),
         backends: vec![
-            Box::new(FakeBackend::new("pacman", vec![firefox, tool])),
+            Box::new(Live {
+                system: system.clone(),
+                delay_ms: delay_ms.clone(),
+            }),
             Box::new(FakeBackend::new("flatpak", vec![flat])),
         ],
         installer: Arc::new(Scripted {
             mode: mode.clone(),
             runs: runs.clone(),
+            system,
         }),
         installable: vec![SourceId::new("pacman")],
         host: Host::with_native("pacman"),
@@ -174,7 +221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     4 => {
-                        if !ui.get_op_active() && ui.get_op_status() != "" && settled {
+                        if !ui.get_op_active()
+                            && !ui.get_op_settling()
+                            && ui.get_op_status() != ""
+                            && settled
+                        {
                             println!(
                                 "after cancel: status={:?} error={} runs={}",
                                 ui.get_op_status(),
@@ -349,6 +400,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             assert_eq!(ui.get_op_status(), "cancelled");
                             println!("A page: status {:?}", ui.get_op_status());
                             save(&ui, &format!("{dir2}/fake-a-status.png"))?;
+                            next = true;
+                        }
+                    }
+                    19 => {
+                        if settled && !ui.get_op_settling() {
+                            // A successful install whose reload takes 2 s.
+                            *mode.lock().unwrap() = Mode::Succeed;
+                            delay_ms.store(2000, Ordering::SeqCst);
+                            runs_before.set(runs.load(Ordering::SeqCst));
+                            let first = ui.get_app_page().sources.row_data(0).unwrap();
+                            assert!(!first.installed);
+                            ui.invoke_install_clicked("pacman".into());
+                            next = true;
+                        }
+                    }
+                    20 => {
+                        if !ui.get_op_active() && ui.get_op_status() == "Done" {
+                            // Finished: the bar is gone, the buttons wait for the reload.
+                            assert!(ui.get_op_settling(), "buttons must wait after Finished");
+                            let first = ui.get_app_page().sources.row_data(0).unwrap();
+                            assert!(!first.installed, "the page is not reloaded yet");
+                            ui.invoke_install_clicked("pacman".into());
+                            println!("settling: status {:?}", ui.get_op_status());
+                            save(&ui, &format!("{dir2}/fake-settling.png"))?;
+                            next = true;
+                        }
+                    }
+                    21 => {
+                        if !ui.get_op_settling() {
+                            let first = ui.get_app_page().sources.row_data(0).unwrap();
+                            assert!(first.installed, "the page shows the result when it opens");
+                            assert_eq!(
+                                runs.load(Ordering::SeqCst),
+                                runs_before.get() + 1,
+                                "a click while settling must be ignored"
+                            );
+                            println!(
+                                "settled after {:?}: installed, one run only",
+                                mark.get().elapsed()
+                            );
+                            delay_ms.store(0, Ordering::SeqCst);
+                            next = true;
+                        }
+                    }
+                    22 => {
+                        if settled {
+                            save(&ui, &format!("{dir2}/fake-settled.png"))?;
                             next = true;
                         }
                     }

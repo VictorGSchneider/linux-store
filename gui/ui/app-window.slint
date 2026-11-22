@@ -40,6 +40,10 @@ export component AppWindow inherits Window {
     }
     // an install or remove is running
     in property <bool> op-active;
+    // the last operation ended; its source is being reloaded, the page buttons wait
+    in property <bool> op-settling;
+    // a refresh is running (some source is being reloaded)
+    in property <bool> refreshing;
     in property <string> op-message;
     // 0..100, or -1 when the operation reports no percentage
     in property <int> op-percent: -1;
@@ -105,6 +109,7 @@ export component AppWindow inherits Window {
             rows: root.rows;
             results: root.results;
             searching: root.searching;
+            refreshing: root.refreshing;
             query-active: root.query != "";
             card-clicked(key) => {
                 root.card-clicked(key);
@@ -137,6 +142,7 @@ export component AppWindow inherits Window {
         if root.page == Page.app: AppPage {
             data: root.app-page;
             busy: root.op-active;
+            settling: root.op-settling;
             status: root.op-status;
             status-error: root.op-status-error;
             back => {

@@ -3,7 +3,11 @@ import { Theme } from "theme.slint";
 export struct ChipData {
     source: string,
     count: int,
+    // `count` with thousands separators, formatted by the host
+    count-text: string,
     selected: bool,
+    // the source is being refreshed right now
+    updating: bool,
 }
 
 export component Chip inherits Rectangle {
@@ -13,9 +17,10 @@ export component Chip inherits Rectangle {
     height: Theme.chip-height;
     width: max(lay.preferred-width + 24px, 64px);
     border-radius: self.height / 2;
-    background: root.data.selected ? Theme.chip-selected : (touch.has-hover ? Theme.pill-hover : Theme.pill);
+    background: root.data.selected ? Theme.chip-selected : root.data.updating ? Theme.chip-updating : (touch.has-hover ? Theme.pill-hover : Theme.pill);
     accessible-role: button;
     accessible-label: root.data.source;
+    accessible-description: root.data.updating ? @tr("updating") : "";
     accessible-checkable: true;
     accessible-checked: root.data.selected;
     accessible-action-default => {
@@ -32,7 +37,7 @@ export component Chip inherits Rectangle {
         }
 
         Text {
-            text: @tr("{} packages", root.data.count);
+            text: root.data.updating ? @tr("updating…") : @tr("{0} package" | "{0} packages" % root.data.count, root.data.count-text);
             color: root.data.selected ? Theme.pill-text : Theme.pill-text-dim;
             font-size: Theme.font-chip-count;
             horizontal-alignment: center;

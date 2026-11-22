@@ -26,6 +26,8 @@ component SourceRow inherits Rectangle {
     in property <SourceButtonData> data;
     // an operation is running: every button waits
     in property <bool> busy;
+    // the last operation ended but the page does not show its result yet: every button waits
+    in property <bool> settling;
     callback install-clicked(string);
     callback remove-clicked(string);
 
@@ -65,9 +67,9 @@ component SourceRow inherits Rectangle {
 
         PillButton {
             y: (parent.height - self.height) / 2;
-            text: root.data.installed ? @tr("Remove") : @tr("Install");
-            description: root.data.installed ? @tr("Remove {}, version {}", root.data.source, root.data.version) : @tr("Install from {}, version {}", root.data.source, root.data.version);
-            enabled: root.data.enabled && !root.busy;
+            text: root.settling && root.data.enabled ? @tr("Updating…") : root.data.installed ? @tr("Remove") : @tr("Install");
+            description: root.settling && root.data.enabled ? @tr("Waiting for the package list to update") : root.data.installed ? @tr("Remove {}, version {}", root.data.source, root.data.version) : @tr("Install from {}, version {}", root.data.source, root.data.version);
+            enabled: root.data.enabled && !root.busy && !root.settling;
             subdued: root.data.installed;
             clicked => {
                 if root.data.installed {
@@ -130,6 +132,7 @@ component LinkButton inherits Rectangle {
 export component AppPage inherits Rectangle {
     in property <AppPageData> data;
     in property <bool> busy;
+    in property <bool> settling;
     // the last operation's result or error, shown as plain text
     in property <string> status;
     in property <bool> status-error;
@@ -227,6 +230,7 @@ export component AppPage inherits Rectangle {
                 for source in root.data.sources: SourceRow {
                     data: source;
                     busy: root.busy;
+                    settling: root.settling;
                     install-clicked(s) => {
                         root.install-clicked(s);
                     }

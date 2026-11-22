@@ -11,7 +11,8 @@ pub struct CardView {
     pub key: String,
     pub title: String,
     pub subtitle: String,
-    /// The source of the first variant (the host-ordered primary).
+    /// The source label: the row's source in a source row, else the first variant's (the
+    /// host-ordered primary).
     pub source: String,
     pub installed: bool,
     /// Already darkened for white text, see [`readable_accent`].
@@ -19,15 +20,33 @@ pub struct CardView {
     pub icon_path: Option<String>,
 }
 
+/// Longest card title, in characters.
+pub const MAX_CARD_TITLE_CHARS: usize = 200;
+/// Longest card subtitle (the description on a text card), in characters.
+pub const MAX_CARD_SUBTITLE_CHARS: usize = 300;
+
+/// A card for `app` labelled with its primary source (search results, Installeds, Updates).
 pub fn card_view(app: &App) -> CardView {
+    card_view_labelled(app, None)
+}
+
+/// A card for `app` in the row of `row_source`: the label is the row's source, which the app
+/// has a variant in, even when another source comes first in the host order.
+pub fn card_view_in_row(app: &App, row_source: &SourceId) -> CardView {
+    card_view_labelled(app, Some(row_source))
+}
+
+fn card_view_labelled(app: &App, label: Option<&SourceId>) -> CardView {
     CardView {
         key: app.key.clone(),
-        title: app.title.clone(),
-        subtitle: app.description().unwrap_or_default().to_string(),
-        source: app
-            .variants
-            .first()
-            .map(|p| p.source.to_string())
+        title: sanitize_text(&app.title, MAX_CARD_TITLE_CHARS),
+        subtitle: sanitize_text(
+            app.description().unwrap_or_default(),
+            MAX_CARD_SUBTITLE_CHARS,
+        ),
+        source: label
+            .or_else(|| app.variants.first().map(|p| &p.source))
+            .map(SourceId::to_string)
             .unwrap_or_default(),
         installed: app.is_installed(),
         accent: readable_accent(store_app::accent(&app.title)),
@@ -117,17 +136,27 @@ pub fn day_of_year(days: u64) -> u64 {
 pub struct ChipView {
     pub source: String,
     pub count: usize,
+    /// `count` with thousands separators, for the plural-aware text in `chip.slint`.
+    pub count_text: String,
     pub selected: bool,
+    /// The source is being refreshed right now.
+    pub updating: bool,
 }
 
-/// One chip per source, in the engine's order.
-pub fn chip_views(chips: &[(SourceId, usize)], selected: Option<&SourceId>) -> Vec<ChipView> {
+/// One chip per source, in the engine's order. `updating` tells which sources are refreshing.
+pub fn chip_views(
+    chips: &[(SourceId, usize)],
+    selected: Option<&SourceId>,
+    updating: &dyn Fn(&SourceId) -> bool,
+) -> Vec<ChipView> {
     chips
         .iter()
         .map(|(source, count)| ChipView {
             source: source.to_string(),
             count: *count,
+            count_text: group_thousands(*count),
             selected: selected == Some(source),
+            updating: updating(source),
         })
         .collect()
 }
@@ -138,9 +167,24 @@ pub fn chip_data(views: Vec<ChipView>) -> Vec<ChipData> {
         .map(|v| ChipData {
             source: v.source.into(),
             count: v.count.min(i32::MAX as usize) as i32,
+            count_text: v.count_text.into(),
             selected: v.selected,
+            updating: v.updating,
         })
         .collect()
+}
+
+/// `n` with a comma every three digits ("125,813"). The interface is English for now.
+pub fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub fn card_data(view: &CardView, icon: Option<slint::Image>) -> CardData {
@@ -168,9 +212,18 @@ pub fn cards(apps: &[App], icon_of: &dyn Fn(&str) -> Option<slint::Image>) -> Ve
 }
 
 pub fn row_data(row: &Row, icon_of: &dyn Fn(&str) -> Option<slint::Image>) -> RowData {
+    let cards: Vec<CardData> = row
+        .apps
+        .iter()
+        .map(|app| {
+            let view = card_view_in_row(app, &row.source);
+            let icon = view.icon_path.as_deref().and_then(icon_of);
+            card_data(&view, icon)
+        })
+        .collect();
     RowData {
         title: row.source.to_string().into(),
-        cards: slint::ModelRc::new(slint::VecModel::from(cards(&row.apps, icon_of))),
+        cards: slint::ModelRc::new(slint::VecModel::from(cards)),
     }
 }
 
@@ -190,6 +243,9 @@ pub const MAX_MESSAGE_CHARS: usize = 300;
 pub const MAX_DESCRIPTION_CHARS: usize = 4000;
 /// Longest title shown on the page, in characters.
 pub const MAX_TITLE_CHARS: usize = 200;
+/// Longest homepage URL offered as a link, in characters. A longer one is not offered at all:
+/// cutting it would open a different address.
+pub const MAX_URL_CHARS: usize = 2000;
 /// Why a source's button is disabled.
 pub const NO_INSTALLER_REASON: &str = "no installer for this source yet";
 
@@ -250,6 +306,9 @@ pub fn is_openable_url(url: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceButton {
     pub source: String,
+    /// The package the button acts on (the variant's name), sent with the click so the engine
+    /// can refuse when the index has changed since.
+    pub package: String,
     /// The installed version when installed, else the newest one.
     pub version: String,
     pub installed: bool,
@@ -266,6 +325,7 @@ pub fn source_buttons(app: &App, installable: &[SourceId]) -> Vec<SourceButton> 
             let enabled = installable.contains(&p.source);
             SourceButton {
                 source: p.source.to_string(),
+                package: p.name.clone(),
                 version: sanitize_text(
                     p.installed_version.as_deref().unwrap_or(&p.version),
                     MAX_TITLE_CHARS,
@@ -289,7 +349,7 @@ pub struct PageView {
     pub title: String,
     pub description: String,
     pub size: String,
-    /// The first non-empty `url` among the variants, sanitised; may not be openable.
+    /// The first `url` among the variants that may be opened (see [`homepage_of`]), else empty.
     pub homepage: String,
     pub accent: (u8, u8, u8),
     pub icon_path: Option<String>,
@@ -313,17 +373,22 @@ pub fn page_view(view: &store_app::AppView) -> PageView {
         title: sanitize_text(&app.title, MAX_TITLE_CHARS),
         description: sanitize_text(app.description().unwrap_or_default(), MAX_DESCRIPTION_CHARS),
         size: human_size(bytes),
-        homepage: app
-            .variants
-            .iter()
-            .filter_map(|p| p.url.as_deref())
-            .map(|u| sanitize_text(u, MAX_MESSAGE_CHARS))
-            .find(|u| !u.is_empty())
-            .unwrap_or_default(),
+        homepage: homepage_of(app),
         accent: readable_accent(store_app::accent(&app.title)),
         icon_path: app.icon().map(str::to_string),
         sources: source_buttons(app, &view.installable),
     }
+}
+
+/// The link the page offers: the first variant `url` that is openable as it is and at most
+/// [`MAX_URL_CHARS`] long. It is never cut or rewritten, so the link opens what it shows.
+pub fn homepage_of(app: &App) -> String {
+    app.variants
+        .iter()
+        .filter_map(|p| p.url.as_deref())
+        .find(|u| u.chars().count() <= MAX_URL_CHARS && is_openable_url(u))
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn page_data(view: &PageView, icon: Option<slint::Image>) -> AppPageData {
@@ -352,9 +417,10 @@ pub fn page_data(view: &PageView, icon: Option<slint::Image>) -> AppPageData {
     }
 }
 
-/// The item count next to a list page's title: "(12)". The title itself is translated in the UI.
+/// The item count next to a list page's title: "(12)", "(1,234)". The title itself is
+/// translated in the UI.
 pub fn count_text(count: usize) -> String {
-    format!("({count})")
+    format!("({})", group_thousands(count))
 }
 
 /// Which explanation a list page shows instead of its (empty) grid.
@@ -376,7 +442,90 @@ mod tests {
     fn count_text_formats_zero_one_and_many() {
         assert_eq!(count_text(0), "(0)");
         assert_eq!(count_text(1), "(1)");
-        assert_eq!(count_text(1234), "(1234)");
+        assert_eq!(count_text(1234), "(1,234)");
+    }
+
+    #[test]
+    fn thousands_are_grouped() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(1), "1");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(16609), "16,609");
+        assert_eq!(group_thousands(125_813), "125,813");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn chips_carry_grouped_counts_and_the_updating_state() {
+        let chips = vec![(SourceId::new("pacman"), 16609), (SourceId::new("aur"), 1)];
+        let v = chip_views(&chips, None, &|s| s.as_str() == "aur");
+        assert_eq!(v[0].count_text, "16,609");
+        assert!(!v[0].updating);
+        assert_eq!(v[1].count_text, "1");
+        assert!(v[1].updating);
+    }
+
+    #[test]
+    fn card_text_is_sanitised_and_capped() {
+        let mut p = pkg("pacman", false);
+        p.description = Some(format!("evil\u{1b}[2J\n{}", "d".repeat(1000)));
+        let a = app(&format!("T\u{7}itle{}", "t".repeat(500)), vec![p]);
+        let v = card_view(&a);
+        assert!(!v.title.chars().any(char::is_control));
+        assert!(!v.subtitle.chars().any(char::is_control));
+        assert_eq!(v.title.chars().count(), MAX_CARD_TITLE_CHARS);
+        assert_eq!(v.subtitle.chars().count(), MAX_CARD_SUBTITLE_CHARS);
+        assert!(v.title.starts_with("T itle"));
+    }
+
+    #[test]
+    fn a_card_in_a_source_row_is_labelled_with_the_row_source() {
+        // Host order puts pacman first, but the card sits in the flatpak row.
+        let a = app("Weather", vec![pkg("pacman", false), pkg("flatpak", false)]);
+        assert_eq!(
+            card_view_in_row(&a, &SourceId::new("flatpak")).source,
+            "flatpak"
+        );
+        assert_eq!(
+            card_view_in_row(&a, &SourceId::new("pacman")).source,
+            "pacman"
+        );
+        // Elsewhere (search, lists) the primary source labels it.
+        assert_eq!(card_view(&a).source, "pacman");
+    }
+
+    #[test]
+    fn source_buttons_carry_the_package_they_act_on() {
+        let mut flat = pkg("flatpak", false);
+        flat.name = "org.mozilla.firefox".into();
+        let a = app("Firefox", vec![pkg("pacman", false), flat]);
+        let b = source_buttons(&a, &[SourceId::new("pacman")]);
+        assert_eq!(b[0].package, "firefox");
+        assert_eq!(b[1].package, "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn an_over_long_or_unopenable_homepage_is_not_offered() {
+        let long = format!("https://example.org/{}", "a".repeat(MAX_URL_CHARS));
+        let mut a = pkg("pacman", false);
+        a.url = Some(long);
+        let mut b = pkg("flatpak", false);
+        b.url = Some("https://example.org/ok".into());
+        // The long one is skipped, not cut: the next openable one is offered.
+        let v = page_view(&view(app("X", vec![a.clone(), b]), &[]));
+        assert_eq!(v.homepage, "https://example.org/ok");
+        let only_long = page_view(&view(app("X", vec![a]), &[]));
+        assert_eq!(only_long.homepage, "");
+        let mut c = pkg("pacman", false);
+        c.url = Some("javascript:alert(1)".into());
+        assert_eq!(page_view(&view(app("X", vec![c]), &[])).homepage, "");
+        // Exactly at the limit is still offered, unchanged.
+        let exact = format!("https://e.org/{}", "b".repeat(MAX_URL_CHARS - 14));
+        assert_eq!(exact.chars().count(), MAX_URL_CHARS);
+        let mut d = pkg("pacman", false);
+        d.url = Some(exact.clone());
+        assert_eq!(page_view(&view(app("X", vec![d]), &[])).homepage, exact);
     }
 
     #[test]
@@ -453,7 +602,7 @@ mod tests {
             (SourceId::new("pacman"), 20),
             (SourceId::new("aur"), 7),
         ];
-        let v = chip_views(&chips, Some(&SourceId::new("pacman")));
+        let v = chip_views(&chips, Some(&SourceId::new("pacman")), &|_| false);
         let labels: Vec<_> = v.iter().map(|c| c.source.as_str()).collect();
         assert_eq!(labels, ["flatpak", "pacman", "aur"]);
         let selected: Vec<_> = v.iter().map(|c| c.selected).collect();

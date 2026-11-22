@@ -10,6 +10,8 @@ export component HomePage inherits Rectangle {
     in property <[RowData]> rows;
     in property <[CardData]> results;
     in property <bool> searching;
+    // a refresh is running: an empty home says the index is being built
+    in property <bool> refreshing;
     in property <bool> query-active;
     callback card-clicked(string);
 
@@ -28,6 +30,14 @@ export component HomePage inherits Rectangle {
             padding-bottom: Theme.page-padding;
             spacing: Theme.row-gap;
             alignment: start;
+
+            if !root.show-results && root.rows.length == 0 && root.refreshing: Text {
+                text: @tr("Building the package index…");
+                color: Theme.text-dim;
+                font-size: Theme.font-message;
+                horizontal-alignment: center;
+                accessible-role: text;
+            }
 
             if !root.show-results: VerticalLayout {
                 spacing: Theme.row-gap;
