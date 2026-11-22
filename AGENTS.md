@@ -56,7 +56,8 @@ environment variable that exposes them.
 Before you work on the UI, install the Slint plugin from [slint-ui/ai-plugins](https://github.com/slint-ui/ai-plugins).
 It teaches you the `.slint` language and its pitfalls.
 It also lets you search the documentation, and lets you render and drive the running UI.
-(Some agent sessions already have it; check before suggesting the install.)
+(Some agent sessions already have it; check before suggesting the install. Driving the running
+app is subject to the renderer and no-install rules above and below.)
 If it isn't installed, suggest that the user install it:
 
 ```sh
@@ -90,6 +91,9 @@ cargo build
 cargo run
 ```
 
+On the main dev laptop `cargo run` of the GUI must use one of the safe renderer settings from the
+Known issue section below; agents never run it (they use the headless examples).
+
 ## Known issue: plain `cargo run` can freeze the dev machine
 
 On the main dev laptop (NVIDIA RTX 4050 + AMD 680M, Wayland/niri, nvidia 620.70.06),
@@ -110,10 +114,8 @@ Use one of these on that machine until the NVIDIA/EGL problem is understood.
 
 ## Live Preview
 
-Live preview, `cargo run` and the plugin's running-UI tools are for the owner's machine with the
-safe renderer settings above; agents use the headless examples instead.
-
-While you work on the UI, build and run the application with live preview.
+While you work on the UI, build and run the application with live preview
+(on the owner's machine, with the safe renderer settings above; agents use the headless examples instead).
 It compiles much faster, because the `.slint` files aren't compiled to native code.
 
 ```sh
@@ -131,7 +133,8 @@ Use live preview only during development, and keep it out of the build files.
 
 - Check `.slint` changes without a full build with `slint-viewer --check .`.
 - Look at a render before you call UI work done:
-  use the plugin's preview, or a screenshot of the live-preview application.
+  use the plugin's preview, or a screenshot of the live-preview application (owner's machine);
+  agents Read the PNGs the headless examples in `gui/examples/` write.
 - When the UI changes visibly, update the screenshots in `README.md`.
 - Format changed `.slint` files with `slint-lsp format -i <file>`.
 - If `slint-viewer`/`slint-lsp` are not installed (as in the agent sandbox so far),
