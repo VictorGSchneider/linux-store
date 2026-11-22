@@ -13,6 +13,10 @@ export struct CardData {
 
 export component Card inherits Rectangle {
     in property <CardData> data;
+    // false when a parent owns the keyboard focus (the list page's roving selection)
+    in property <bool> focusable: true;
+    // draw the focus ring although this card holds no focus itself (the parent's selection)
+    in property <bool> ring: false;
     callback clicked(string);
 
     width: Theme.card-width;
@@ -115,6 +119,7 @@ export component Card inherits Rectangle {
     }
 
     fs := FocusScope {
+        enabled: root.focusable;
         key-pressed(event) => {
             if event.text == " " || event.text == Key.Return {
                 root.clicked(root.data.key);
@@ -127,7 +132,7 @@ export component Card inherits Rectangle {
     // focus ring
     Rectangle {
         border-radius: root.border-radius;
-        border-width: fs.has-focus ? Theme.focus-ring-width : 0px;
+        border-width: fs.has-focus || root.ring ?Theme.focus-ring-width : 0px;
         border-color: Theme.focus-ring;
     }
 

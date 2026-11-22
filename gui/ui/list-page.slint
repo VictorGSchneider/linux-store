@@ -14,6 +14,13 @@ export enum EmptyKind {
 // well over a thousand packages). The grid keeps its full height, but only the cards in view
 // plus a margin are instantiated: positions past ~32000 px break the software renderer (i16
 // coordinates, a panic), and a thousand cards is needless work. The Cards are cheap otherwise.
+// (Checked: with the grid at full height the end of a 6000-card list, ~560000 px, still renders.)
+//
+// Keyboard: the page is ONE tab stop with a roving selection (the ring), not one stop per card,
+// because the cards in view are recycled while scrolling and a focus held by a recycled card
+// would jump to another app. Arrows move the selection, PageUp/PageDown move a screenful, Home/
+// End jump to the ends, Return/Space opens the selected app; the selected card is always
+// scrolled into view. Limitation: Tab does not walk from card to card; use the arrows.
 export component ListPage inherits Rectangle {
     in property <string> title;
     // the count as shown next to the title, e.g. "(12)"
@@ -22,7 +29,64 @@ export component ListPage inherits Rectangle {
     in property <string> note;
     in property <[CardData]> cards;
     in property <EmptyKind> empty: EmptyKind.none;
+    // the index of the card with the keyboard selection, -1 before the first key
+    in-out property <int> selected: -1;
     callback card-clicked(string);
+
+    // Selects card `i` (clamped) and scrolls its row into view.
+    function select(i: int) {
+        if root.cards.length == 0 {
+            return;
+        }
+        root.selected = max(0, min(root.cards.length - 1, i));
+        // where the grid starts inside the scrolled content
+        // (cells.absolute-position.y = page top + content-y + offset)
+        let offset = cells.absolute-position.y - root.absolute-position.y - scroll.content-y;
+        let top = offset + Math.floor(root.selected / root.columns) * root.pitch;
+        let bottom = top + Theme.card-height;
+        let lowest = scroll.content-height - scroll.height;
+        if top < -scroll.content-y {
+            scroll.content-y = -max(0px, min(lowest, top - Theme.row-gap));
+        } else if bottom > -scroll.content-y + scroll.height {
+            scroll.content-y = -max(0px, min(lowest, bottom + Theme.row-gap - scroll.height));
+        }
+    }
+
+    function page-step() -> int {
+        return max(1, Math.floor(scroll.height / root.pitch) - 1) * root.columns;
+    }
+
+    keys := FocusScope {
+        focus-gained => {
+            if root.selected < 0 {
+                root.select(0);
+            }
+        }
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                root.select(root.selected - root.columns);
+            } else if event.text == Key.DownArrow {
+                root.select(root.selected + root.columns);
+            } else if event.text == Key.LeftArrow {
+                root.select(root.selected - 1);
+            } else if event.text == Key.RightArrow {
+                root.select(root.selected + 1);
+            } else if event.text == Key.PageUp {
+                root.select(root.selected - root.page-step());
+            } else if event.text == Key.PageDown {
+                root.select(root.selected + root.page-step());
+            } else if event.text == Key.Home {
+                root.select(0);
+            } else if event.text == Key.End {
+                root.select(root.cards.length - 1);
+            } else if (event.text == " " || event.text == Key.Return) && root.selected >= 0 && root.selected < root.cards.length {
+                root.card-clicked(root.cards[root.selected].key);
+            } else {
+                return reject;
+            }
+            return accept;
+        }
+    }
 
     private property <length> content-width: min(self.width, Theme.content-max-width) - 2 * Theme.page-padding;
     // as many cards as fit the width, at least one
@@ -90,10 +154,12 @@ export component ListPage inherits Rectangle {
 
             HorizontalLayout {
                 alignment: center;
-                Rectangle {
+                cells := Rectangle {
                     width: root.content-width;
                     height: root.grid-rows * root.pitch;
                     for i in root.shown-cards: Card {
+                        focusable: false;
+                        ring: keys.has-focus && root.first-row * root.columns + i == root.selected;
                         x: Math.mod(i, root.columns) * (Theme.card-width + Theme.card-gap);
                         y: (root.first-row + Math.floor(i / root.columns)) * root.pitch;
                         data: root.cards[root.first-row * root.columns + i];

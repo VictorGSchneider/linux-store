@@ -33,6 +33,11 @@ export component AppWindow inherits Window {
     in property <[CardData]> updates;
     in property <string> updates-count;
     in property <EmptyKind> updates-empty;
+    // the keyboard selection of the visible list page (-1: none); reset whenever the page changes
+    in-out property <int> list-selected: -1;
+    changed page => {
+        root.list-selected = -1;
+    }
     // an install or remove is running
     in property <bool> op-active;
     in property <string> op-message;
@@ -111,6 +116,7 @@ export component AppWindow inherits Window {
             count-text: root.installed-count;
             cards: root.installed;
             empty: root.installed-empty;
+            selected <=> root.list-selected;
             card-clicked(key) => {
                 root.card-clicked(key);
             }
@@ -122,6 +128,7 @@ export component AppWindow inherits Window {
             note: @tr("Updates are listed for pacman only");
             cards: root.updates;
             empty: root.updates-empty;
+            selected <=> root.list-selected;
             card-clicked(key) => {
                 root.card-clicked(key);
             }
