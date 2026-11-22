@@ -55,7 +55,9 @@ jobs:
   # library's unit tests (pure state and conversions). The window itself is never opened here
   # (see the GPU note in AGENTS.md).
   gui:
-    name: GUI build and tests (Arch Linux)
+    # The job name is a required status check on `main`: renaming it leaves the PR waiting forever
+    # for a check that is never reported. Change it only together with the branch protection.
+    name: GUI build check (Arch Linux)
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
