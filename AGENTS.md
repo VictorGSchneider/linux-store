@@ -45,6 +45,8 @@ environment variable that exposes them.
   NEVER construct the real installer. Only `gui/src/main.rs` builds it.
 - A real-engine run (`live_snapshot`) must use a temporary `XDG_CACHE_HOME`; the first refresh
   downloads the AUR dump. Its snapshots show this machine's installed packages: do not commit them.
+  The README's `home.png` and `app-page.png` come from `readme_shots` (real catalogs, no installed
+  state), `installeds.png` from `fake_lists` (cropped to 1000x440). Never edit their pixels.
 - Arch's AppStream icons are JPEG XL (`.jxl`), decoded with `jxl-oxide` in `app/src/icons.rs`
   (PNG too); an icon that fails to decode falls back to a letter tile.
 - Size contracts are in the headers of `gui/ui/row.slint`, `home-page.slint` and `list-page.slint`
