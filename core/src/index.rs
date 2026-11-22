@@ -383,7 +383,7 @@ fn prefixed_columns() -> String {
 
 /// Deletes and refills `app_links`, a pure function of `packages`, with one statement.
 ///
-/// 1. base key: the package's own `app_id`; else the smallest `app_id` among packages with the
+/// 1. base key: the package's own `app_id` (an empty one counts as none); else the smallest `app_id` among packages with the
 ///    same lowercased name (any source); else its lowercased name;
 /// 2. among packages of the same source and base, the smallest name keeps the base and each other
 ///    gets `base#name`, so one app never has two variants from the same source;
@@ -398,9 +398,9 @@ fn rebuild_links_in(conn: &Connection) -> rusqlite::Result<()> {
          WITH base AS (
              SELECT p.source, p.name,
                     coalesce(
-                        p.app_id,
+                        nullif(p.app_id, ''),
                         (SELECT min(q.app_id) FROM packages q
-                          WHERE lower(q.name) = lower(p.name) AND q.app_id IS NOT NULL),
+                          WHERE lower(q.name) = lower(p.name) AND nullif(q.app_id, '') IS NOT NULL),
                         lower(p.name)
                     ) AS base
                FROM packages p
@@ -1232,6 +1232,77 @@ mod tests {
         assert_eq!(n, 1);
         assert!(idx.members("old").unwrap().is_empty());
         assert_eq!(names(idx.members("new").unwrap()), ["new"]);
+    }
+
+    fn in_order(order: &[&str], packages: &[Package]) -> Index {
+        let mut idx = Index::open_in_memory().unwrap();
+        for source in order {
+            let of: Vec<Package> = packages
+                .iter()
+                .filter(|p| p.source.as_str() == *source)
+                .cloned()
+                .collect();
+            idx.replace_source(&sid(source), &of).unwrap();
+        }
+        idx
+    }
+
+    #[test]
+    fn a_name_shared_by_two_app_ids_takes_the_smaller_whatever_the_order() {
+        let a = with_app_id("pacman", "foo", "org.x.Y");
+        let c = with_app_id("flatpak", "foo", "org.a.X");
+        let b = pkg("aur", "foo", "x");
+        let all = [a.clone(), b.clone(), c.clone()];
+        let orders: [[&str; 3]; 3] = [
+            ["pacman", "flatpak", "aur"],
+            ["aur", "flatpak", "pacman"],
+            ["flatpak", "aur", "pacman"],
+        ];
+        for order in orders {
+            let idx = in_order(&order, &all);
+            assert_eq!(key(&idx, &b), "org.a.X", "{order:?}");
+            assert_eq!(key(&idx, &a), "org.x.Y", "{order:?}");
+            assert_eq!(key(&idx, &c), "org.a.X", "{order:?}");
+        }
+    }
+
+    #[test]
+    fn names_differing_only_by_case_in_one_source_stay_separate() {
+        let upper = pkg("aur", "Foo", "x");
+        let lower = pkg("aur", "foo", "x");
+        for order in [
+            [upper.clone(), lower.clone()],
+            [lower.clone(), upper.clone()],
+        ] {
+            let idx = multi(&order);
+            assert_eq!(key(&idx, &upper), "foo");
+            assert_eq!(key(&idx, &lower), "foo#foo");
+        }
+    }
+
+    #[test]
+    fn an_empty_app_id_counts_as_none() {
+        let a = with_app_id("pacman", "one", "");
+        let b = with_app_id("flatpak", "two", "");
+        let idx = multi(&[a.clone(), b.clone()]);
+        assert_eq!(key(&idx, &a), "one");
+        assert_eq!(key(&idx, &b), "two");
+        let empty = with_app_id("aur", "firefox", "");
+        let real = with_app_id("pacman", "firefox", "org.mozilla.firefox");
+        let idx = multi(&[empty.clone(), real]);
+        assert_eq!(key(&idx, &empty), "org.mozilla.firefox");
+    }
+
+    #[test]
+    fn replacing_a_source_with_nothing_removes_its_links() {
+        let mut idx = multi(&[pkg("aur", "a", "x"), pkg("pacman", "b", "x")]);
+        idx.replace_source(&sid("aur"), &[]).unwrap();
+        let n: i64 = idx
+            .conn
+            .query_row("SELECT COUNT(*) FROM app_links", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(idx.members("a").unwrap().is_empty());
     }
 
     #[test]
