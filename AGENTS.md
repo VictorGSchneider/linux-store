@@ -54,6 +54,31 @@ environment variable that exposes them.
   positions past ~32000 px break the software renderer). Read them before changing those pages.
 - Manual verification with the real helper is `packaging/manual-gui-check.md`, run by the user only.
 
+## Loops and continuous documentation
+
+Work is split into packages (P0, P1, ... in `docs/log/progress.json`); each plan task is a step.
+Three loops, kept separate so the agent's context stays small:
+
+1. **Execution loop.** Take the next unchecked task of the current plan, do it (TDD), commit, move on.
+   Do not stop between tasks unless something needs the user.
+2. **Monitoring loop.** For builds, tests and CI that take a while, start them with
+   `scripts/watch-build.sh start <dir> <command...>` and poll with `scripts/watch-build.sh wait <dir> 60`
+   (or `/loop 1m`). Each check reads only the exit code (`ok` or `falhou <code>`), never the compiler
+   output. Do not read `out.log` while it is running or when it passed.
+3. **Fix loop.** Only on failure: `scripts/log-excerpt.sh <dir>/out.log` prints just the first error and
+   its context. Fix that error, add an `E-NNN` entry to `docs/log/errors.md` (symptom, cause, fix, commit),
+   run again through the monitoring loop. After 3 failed tries on the same error, stop and ask the user.
+
+Documentation is updated as part of every package, not at the end (all in Portuguese, like the designs):
+
+- `docs/log/journal.md`: chronological diary, one line per fact, with the commit hash.
+- `docs/log/errors.md`: error registry (`E-NNN`: symptom, cause, fix).
+- `docs/log/decisions.md`: technical decisions (`D-NNN`: context, decision, reason, alternatives).
+- `docs/log/progress.json` is the data source. After closing a package, update it (done/total, status,
+  tests) and run `python3 -I scripts/gen-dashboard.py`: it rewrites `STATUS.md` and
+  `docs/log/dashboard.html`. Never edit those two by hand.
+- Commit the log files in the same commit as the work, or in a `docs: log P<N>` commit right after.
+
 ## Install the Slint Plugin
 
 Before you work on the UI, install the Slint plugin from [slint-ui/ai-plugins](https://github.com/slint-ui/ai-plugins).

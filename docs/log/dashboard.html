@@ -1,0 +1,40 @@
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>linux-store: painel</title>
+<style>
+:root{--bg:#fff;--fg:#1d2126;--mut:#5b6670;--line:#d9dee3;--acc:#2f6fed;--card:#f3f5f7}
+@media (prefers-color-scheme:dark){:root{--bg:#14171a;--fg:#e6e9ec;--mut:#98a2ab;--line:#2c333a;--acc:#6b9bff;--card:#1d2227}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0 auto;max-width:960px;padding:0 16px 48px}
+h1{font-size:1.4rem}h2{font-size:1.05rem;margin-top:2rem}
+.cards{display:flex;flex-wrap:wrap;gap:12px}.card{background:var(--card);border-radius:8px;padding:10px 16px}
+.card b{display:block;font-size:1.5rem}.card span{color:var(--mut);font-size:.8rem}
+table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+small{color:var(--mut)}.bar{background:var(--line);border-radius:4px;height:8px;width:120px}.bar i{display:block;background:var(--acc);height:8px;border-radius:4px}
+pre{background:var(--card);padding:10px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+@media (max-width:600px){td:nth-child(5),th:nth-child(5){display:none}}
+</style></head><body>
+<h1>linux-store: painel</h1><small>Atualizado em 2026-11-22. Gerado de docs/log/progress.json.</small>
+<div class="cards"><div class="card"><b>35/35</b><span>tarefas</span></div><div class="card"><b>198</b><span>testes ok</span></div><div class="card"><b>0</b><span>testes falhando</span></div><div class="card"><b>11</b><span>erros</span></div><div class="card"><b>12</b><span>decisões</span></div></div>
+<h2>Pacotes</h2><table><tr><th>#</th><th>Pacote</th><th>Tarefas</th><th>Estado</th><th>Datas</th></tr><tr><td>P0</td><td>Fundação: workspace, README, CI<br><small>docs/2026-11-18-linux-store-design.md</small></td><td><div class='bar'><i style='width:100%'></i></div>1/1</td><td>fundido</td><td>2026-11-18</td></tr><tr><td>P1</td><td>Core, índice SQLite e backend pacman<br><small>docs/2026-11-18-core-index-pacman-plan.md</small></td><td><div class='bar'><i style='width:100%'></i></div>6/6</td><td>fundido</td><td>2026-11-18</td></tr><tr><td>P2</td><td>Backends AUR e Flatpak (leitura)<br><small>docs/2026-11-20-aur-flatpak-plan.md</small></td><td><div class='bar'><i style='width:100%'></i></div>4/4</td><td>fundido</td><td>2026-11-20</td></tr><tr><td>P3</td><td>Helper privilegiado (pkexec)<br><small>docs/2026-11-20-privileged-helper-plan.md</small></td><td><div class='bar'><i style='width:100%'></i></div>6/6</td><td>fundido (PR #4)</td><td>2026-11-20 a 2026-11-21</td></tr><tr><td>P4</td><td>Minors das etapas 1 a 3 e busca por fonte<br><small></small></td><td><div class='bar'><i style='width:100%'></i></div>1/1</td><td>fundido (PR #5)</td><td>2026-11-21</td></tr><tr><td>P5</td><td>GUI Slint, rodada 1<br><small>docs/2026-11-21-gui-round1-plan.md (branch worktree-gui-design)</small></td><td><div class='bar'><i style='width:100%'></i></div>17/17</td><td>pronto, não fundido (41 commits)</td><td>2026-11-21 a 2026-11-22</td></tr><tr><td>P6</td><td>Backends apt e dnf, adaptador PackageKit<br><small></small></td><td><div class='bar'><i style='width:0%'></i></div>0/0</td><td>não planejado</td><td></td></tr><tr><td>P7</td><td>Snap, AppImage, firmware, drivers, AUR com compilação<br><small></small></td><td><div class='bar'><i style='width:0%'></i></div>0/0</td><td>não planejado</td><td></td></tr></table>
+<h2>Pendências</h2><ul><li>Remote Flatpak quebrado falha o refresh inteiro, de propósito; exigiria guardar dados por remote</li><li>Latência da busca com prefixo de 3 letras não medida</li><li>Kernel e bootloader fora do conjunto protegido do helper e IgnorePkg em nomes explícitos do install: não verificados</li><li>Cópia privada do banco para o upgrade poder ser cancelado depois do refresh</li><li>Fundir a branch worktree-gui-design (PR, CI verde, merge sem squash)</li></ul>
+<h2>Últimos dias no diário</h2><pre>## 2026-11-20 — Pacotes P2 (AUR e Flatpak) e P3 (helper privilegiado)
+- Proteção da `main` ativada com CI verde; a partir daqui tudo entra por branch, PR e CI (D-007).
+- Plano AUR + Flatpak, 4 tarefas (7cf20b7). `Package.title` e índice v2 (78b2675), AUR pelo dump oficial (5fca3ae), Flatpak pelo catálogo AppStream (1672656), CLI busca nas três fontes (05ab0d5).
+- Revisão achou apps Flatpak legados não indexados, catálogo vazio tratado como sucesso, ranking por título (E-003, a9e1cce).
+- Design do helper privilegiado (4c7929a). Medição: `pkexec` com ação própria `auth_admin_keep` guarda a senha por processo; PackageKit testado e descartado para pacman (D-003, D-004, D-005).
+- Sondas `pkexec` feitas pelo agente abriram prompts de senha sem aviso (E-004; regra permanente na memória).
+- Plano do helper, 6 tarefas (0c0581a). Execução: protocolo (3f48043), instalação e cancelamento (8ad1549), remover/atualizar e conjunto protegido (07ef5e4), laço de requisições, aborto e auditoria (e324c08), `Installer` e cliente pkexec (b2c6b62), CLI install/remove/upgrade (f210358).
+- Revisão de segurança em três rodadas (3ed0cb2, 8bc1bf9, 7e3fad0, 1b06b18): umask vazando para a libalpm, eventos bloqueando a transação, controle de terminal vindo de repositórios, `dev-install.sh` confiando em arquivos graváveis (E-005 a E-008).</pre><pre>## 2026-11-21 — Fechamento do P3, P4 (minors) e início do P5 (GUI)
+- Teste manual real com senha passou duas vezes; `manual-check.sh` ganha mensagens sobre sobras de uma execução cancelada (E-009, 041fd8d).
+- `git push` direto na `main` recusado pela proteção (GH006); fluxo vira branch + PR (E-010).
+- P4: minors das etapas 1 a 3: argv não UTF-8, fonte indisponível explica o motivo, migração do índice em uma transação, CRC do gzip, timeouts e TLS do sistema no AUR, AppStream mais completo (16c5ca9, 408a4be). Busca em colunas por fonte e correção do ranking de consultas curtas (1a1d5d8, E-011). PRs #4 (helper) e #5 (P4) fundidos; 198 testes.
+- Chat anterior ficou grande; recap gravado e nova sessão aberta.
+- Usuário desenha três modelos de interface (`docs/layout model *.png`). Brainstorming da GUI: barra lateral sobreposta, fileira por fonte, página única do app com um botão por fonte, ordem de fontes pelo SO (D-008, D-009).
+- Ícones do catálogo do Arch são JPEG XL: decodificar em memória com `jxl-oxide` (D-010). Tabela `app_links` para ligar o mesmo app entre fontes (D-011).
+- Plano da rodada 1 da GUI, 17 tarefas (7b4d101, 439f7d5). Execução por subagentes na worktree `gui-design`: campos novos e índice v3 (efcab65) até `Engine` (472f990, 98a98e8).</pre><pre>## 2026-11-22 — P5 (GUI, rodada 1)
+- Componentes e tela inicial (9592f5b), busca e chips ligados ao Engine (bd839e1), página do app com um botão por fonte (8d472e3), páginas Installeds e Updates (c3fe5de), listas grandes com teclado (62c139c).
+- Estado de página e operação puro: erros não mexem na operação e respostas de páginas antigas são descartadas (416767a).
+- Core: `Catalog` lê um snapshot e o refresh aceita fontes a recoletar (ae249eb); botões esperam o reload pós-operação (88e6a3c).
+- CI da GUI compila todos os alvos e roda os testes da GUI (08895b1); capturas do README refeitas (7684d63).
+- Branch `worktree-gui-design`: 41 commits à frente da `main`, ainda não fundida.
+- Adicionados loops de trabalho e documentação contínua (este diário, `errors.md`, `decisions.md`, `STATUS.md`, painel HTML).</pre>
+</body></html>
