@@ -11,4 +11,4 @@ store-protocol = { path = "../../protocol" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
